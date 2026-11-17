@@ -1,0 +1,16 @@
+{
+  "name": "nim",
+  "version": "1.0.0",
+  "description": "Nim — a procedural 3D matchstick game",
+  "scripts": {
+    "start": "python3 tools/serve.py"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "type": "module",
+  "private": true
+}

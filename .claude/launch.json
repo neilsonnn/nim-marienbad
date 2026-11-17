@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nim",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["tools/serve.py", "5199"],
+      "port": 5199
+    }
+  ]
+}

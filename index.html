@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Nim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&display=swap" rel="stylesheet">
+<style>
+  :root { --ink: #ece9e2; --dim: rgba(236, 233, 226, 0.55); color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none; }
+  body { font-family: 'Cormorant Garamond', 'EB Garamond', Garamond, Georgia, 'Times New Roman', serif; color: var(--ink); touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas#c { position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; display: block; cursor: default; }
+  canvas#c.pointing { cursor: pointer; }
+  .ov { position: fixed; pointer-events: none; transition: opacity 1.4s ease; }
+  #loading { inset: 0; display: grid; place-items: center; font-style: italic; font-size: 1.1rem; letter-spacing: 0.3em; color: var(--dim); opacity: 1; }
+  #loading.gone { opacity: 0; }
+  #title { inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 0 max(24px, env(safe-area-inset-left)); opacity: 0; background: radial-gradient(ellipse at center, rgba(0,0,0,0.25), rgba(0,0,0,0.65)); }
+  #title.show { opacity: 1; pointer-events: auto; cursor: pointer; }
+  #title.gone { opacity: 0; transition-duration: 1.8s; }
+  #title h1 { margin: 0; font-weight: 300; font-size: clamp(3rem, 11vw, 7rem); letter-spacing: 0.42em; padding-left: 0.42em; line-height: 1; }
+  #title p { margin: 1.4em 0 0; max-width: 30em; font-size: clamp(1rem, 2.6vw, 1.25rem); line-height: 1.55; color: var(--dim); font-style: italic; }
+  #title .begin { margin-top: 2.6em; font-size: 0.95rem; letter-spacing: 0.35em; text-transform: lowercase; color: var(--ink); animation: breathe 3.6s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: 0.35; } }
+  #sub { left: 50%; bottom: calc(max(4.2vh, 28px, var(--frame-bottom, 0px) * 0.55) + env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(92vw, 40em); text-align: center; font-size: clamp(1.05rem, 2.4vw, 1.45rem); font-style: italic; text-shadow: 0 0 6px #000, 0 0 2px #000; opacity: 0; transition-duration: 0.7s; }
+  #sub.show { opacity: 1; }
+  .btns { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(max(10vh, 74px, var(--frame-bottom, 0px) * 0.55 + 46px) + env(safe-area-inset-bottom)); display: flex; gap: 1.2em; align-items: baseline; }
+  button { font: inherit; color: var(--ink); background: none; border: 0; padding: 0.55em 0.9em; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity 0.5s ease; letter-spacing: 0.18em; }
+  button.show { opacity: 1; pointer-events: auto; }
+  #take { font-size: clamp(1.15rem, 2.6vw, 1.4rem); border-bottom: 1px solid rgba(236,233,226,0.5); padding-bottom: 0.25em; }
+  #take:hover { border-bottom-color: var(--ink); }
+  #clear { font-size: 0.95rem; color: var(--dim); font-style: italic; }
+  #take:focus-visible, #clear:focus-visible, #sound:focus-visible { outline: 1px dotted var(--dim); outline-offset: 4px; }
+  #score { bottom: calc(16px + env(safe-area-inset-bottom)); right: calc(20px + env(safe-area-inset-right)); font-size: 0.85rem; letter-spacing: 0.22em; color: var(--dim); white-space: pre; }
+  #sound { position: fixed; bottom: calc(6px + env(safe-area-inset-bottom)); left: calc(10px + env(safe-area-inset-left)); font-size: 0.9rem; font-style: italic; color: var(--dim); opacity: 1; pointer-events: auto; letter-spacing: 0.15em; }
+  body.clean .ov, body.clean button { display: none !important; }
+  #err { inset: 0; display: none; place-items: center; text-align: center; padding: 2em; font-style: italic; color: var(--dim); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="c" aria-label="A game of Nim at a polished marble table"></canvas>
+<div id="loading" class="ov">· · ·</div>
+<div id="title" class="ov" role="dialog" aria-label="Nim">
+  <h1>NIM</h1>
+  <p>Sixteen matches in four rows. On your turn, take as many as you like — but from one row only.<br>Whoever takes the last match loses.</p>
+  <div class="begin" id="begin">click to begin</div>
+</div>
+<div id="sub" class="ov" aria-live="polite"></div>
+<div class="btns">
+  <button id="clear" type="button">clear</button>
+  <button id="take" type="button">take</button>
+</div>
+<div id="score" class="ov"></div>
+<button id="sound" type="button" aria-pressed="true">sound on</button>
+<div id="err" class="ov"></div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

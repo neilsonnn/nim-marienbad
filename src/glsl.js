@@ -1,0 +1,303 @@
+// GLSL library: all lighting, BRDFs, noise and shadowing are written here from scratch.
+
+const N_DISK = 16;
+const disk = [];
+for (let i = 0; i < N_DISK; i++) {
+  const r = Math.sqrt((i + 0.5) / N_DISK);
+  const a = i * 2.399963229728653;
+  disk.push(`vec2(${(r * Math.cos(a)).toFixed(5)}, ${(r * Math.sin(a)).toFixed(5)})`);
+}
+
+export const COMMON = /* glsl */ `
+#define PI 3.14159265359
+#define TAU 6.28318530718
+uniform int uPass;            // 0 = beauty, 1 = mirror (table reflection), 2 = shadow depth
+uniform float uTime;
+uniform float uTableY;
+uniform float uTableR;
+uniform vec3 uKeyPos;
+uniform vec3 uKeyDir;
+uniform vec3 uKeyColor;
+uniform vec2 uKeyCone;        // cos(outer), cos(inner)
+uniform float uKeySize;       // emitter radius (m)
+uniform sampler2D uShadowMap;
+uniform mat4 uShadowMatrix;
+uniform vec4 uShadowParams;   // texel, near, far, penumbra scale
+uniform vec3 uFillDir;
+uniform vec3 uFillColor;
+uniform vec3 uRimDir;
+uniform vec3 uRimColor;
+uniform vec3 uAmbTop;
+uniform vec3 uAmbBot;
+uniform float uEnvGain;
+
+float sat(float x) { return clamp(x, 0.0, 1.0); }
+vec3 sat3(vec3 x) { return clamp(x, 0.0, 1.0); }
+float pow5(float x) { float x2 = x * x; return x2 * x2 * x; }
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float hash13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+
+float vnoise(vec3 p) {
+  vec3 i = floor(p); vec3 f = fract(p); vec3 u = f * f * (3.0 - 2.0 * f);
+  float a = hash13(i), b = hash13(i + vec3(1, 0, 0)), c = hash13(i + vec3(0, 1, 0)), d = hash13(i + vec3(1, 1, 0));
+  float e = hash13(i + vec3(0, 0, 1)), f1 = hash13(i + vec3(1, 0, 1)), g = hash13(i + vec3(0, 1, 1)), h = hash13(i + vec3(1, 1, 1));
+  return mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y), mix(mix(e, f1, u.x), mix(g, h, u.x), u.y), u.z);
+}
+float vnoise2(vec2 p) {
+  vec2 i = floor(p); vec2 f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.07 + 13.7; a *= 0.5; } return s / 0.9375; }
+float fbm2(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise2(p); p = p * 2.11 + 7.3; a *= 0.5; } return s / 0.9375; }
+
+// How much of a procedural feature of world period 'period' survives the pixel footprint.
+float detail(float period, float footprint) { return 1.0 - smoothstep(0.18, 0.55, footprint / period); }
+
+// Bump mapping on arbitrary surfaces (Mikkelsen 2010) from a scalar height field.
+vec3 bumpNormal(vec3 pos, vec3 n, float h) {
+  vec3 dpx = dFdx(pos), dpy = dFdy(pos);
+  vec3 r1 = cross(dpy, n), r2 = cross(n, dpx);
+  float det = dot(dpx, r1);
+  float dhx = dFdx(h), dhy = dFdy(h);
+  vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
+  return normalize(abs(det) * n - grad);
+}
+
+// ---------------------------------------------------------------- BRDFs
+float D_GGX(float NoH, float a) { float a2 = a * a; float f = (NoH * a2 - NoH) * NoH + 1.0; return a2 / (PI * f * f + 1e-7); }
+float V_SmithGGX(float NoV, float NoL, float a) {
+  float a2 = a * a;
+  float gv = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+  float gl = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+  return 0.5 / (gv + gl + 1e-5);
+}
+vec3 F_Schlick(vec3 f0, float VoH) { return f0 + (1.0 - f0) * pow5(1.0 - VoH); }
+// Charlie sheen (Estevez & Kulla) for cloth fibres
+float D_Charlie(float NoH, float r) { float inv = 1.0 / max(r, 0.07); float s2 = max(1.0 - NoH * NoH, 1e-4); return (2.0 + inv) * pow(s2, inv * 0.5) / TAU; }
+float V_Neubelt(float NoV, float NoL) { return 1.0 / (4.0 * (NoL + NoV - NoL * NoV) + 1e-4); }
+// analytic split-sum (Karis, mobile)
+vec2 envBRDF(float NoV, float r) {
+  const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+  const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+  vec4 q = r * c0 + c1;
+  float a004 = min(q.x * q.x, exp2(-9.28 * NoV)) * q.x + q.y;
+  return vec2(-1.04, 1.04) * a004 + q.zw;
+}
+
+// ---------------------------------------------------------------- environment
+// A dark salon: one hanging lamp above the table, faint high windows, black walls.
+vec3 envRadiance(vec3 R, float rough) {
+  vec3 toLamp = normalize(uKeyPos - vec3(0.0, uTableY, 0.0));
+  float sharp = mix(900.0, 2.5, sqrt(rough));
+  float lamp = pow(max(dot(R, toLamp), 0.0), sharp) * (sharp + 2.0) / TAU;
+  lamp *= 0.0035;
+  float sky = 0.010 * smoothstep(-0.15, 0.9, R.y) + 0.003;
+  vec3 w1 = normalize(vec3(-0.85, 0.30, -0.45));
+  vec3 w2 = normalize(vec3(0.9, 0.22, -0.35));
+  float ws = mix(80.0, 3.0, sqrt(rough));
+  float win = (pow(max(dot(R, w1), 0.0), ws) + 0.6 * pow(max(dot(R, w2), 0.0), ws)) * mix(0.10, 0.012, sqrt(rough));
+  float glow = smoothstep(0.30, 0.92, R.y) * mix(0.42, 0.035, sqrt(rough)) * (0.7 + 0.3 * smoothstep(-0.5, 0.8, R.z));
+  return vec3(lamp + sky + win + glow) * uEnvGain;
+}
+vec3 ambientDiffuse(vec3 N) { return mix(uAmbBot, uAmbTop, N.y * 0.5 + 0.5); }
+// fills pool around the table (lamp bounce); bodies further away sink into the dark
+float lightPool(vec3 P) { vec3 d = P - vec3(0.0, uTableY + 0.1, 0.0); return exp(-dot(d, d) / (0.62 * 0.62)); }
+
+// ---------------------------------------------------------------- shadows (PCSS-lite)
+const vec2 DISK[${N_DISK}] = vec2[${N_DISK}](${disk.join(', ')});
+float linShadow(float d) { float n = uShadowParams.y, f = uShadowParams.z; float z = d * 2.0 - 1.0; return 2.0 * n * f / (f + n - z * (f - n)); }
+float shadowPCSS(vec3 P, vec3 N, float soft) {
+  vec3 L = normalize(uKeyPos - P);
+  float NoL = dot(N, L);
+  vec3 offP = P + N * (0.0010 + 0.0025 * (1.0 - abs(NoL)));
+  vec4 sc = uShadowMatrix * vec4(offP, 1.0);
+  if (sc.w <= 0.0) return 1.0;
+  vec2 uv = sc.xy / sc.w * 0.5 + 0.5;
+  if (uv.x <= 0.002 || uv.x >= 0.998 || uv.y <= 0.002 || uv.y >= 0.998) return 1.0;
+  float dR = sc.w;
+  float ang = ign(gl_FragCoord.xy) * TAU;
+  float ca = cos(ang), sa = sin(ang);
+  mat2 rot = mat2(ca, sa, -sa, ca);
+  float tex = uShadowParams.x;
+  float bias = 0.0007 + 0.0016 * (1.0 - sat(NoL));
+  // blocker search
+  float sumB = 0.0, nB = 0.0;
+  for (int i = 0; i < 6; i++) {
+    vec2 o = rot * DISK[i * 2 + 1] * tex * 14.0;
+    float d = linShadow(texture2D(uShadowMap, uv + o).r);
+    if (d < dR - bias) { sumB += d; nB += 1.0; }
+  }
+  if (nB < 0.5) return 1.0;
+  float dB = sumB / nB;
+  float pen = (dR - dB) / dB * uShadowParams.w / dR;
+  pen = clamp(pen * soft, tex * 0.9, tex * 18.0);
+  float lit = 0.0;
+  for (int i = 0; i < SHADOW_TAPS; i++) {
+    vec2 o = rot * DISK[i * (${N_DISK} / SHADOW_TAPS)] * pen;
+    float d = linShadow(texture2D(uShadowMap, uv + o).r);
+    lit += step(dR - bias, d);
+  }
+  return lit / float(SHADOW_TAPS);
+}
+
+// ---------------------------------------------------------------- key light
+vec3 keyLight(vec3 P, out vec3 L, out float dist) {
+  vec3 d = uKeyPos - P;
+  dist = length(d);
+  L = d / dist;
+  float cd = dot(-L, uKeyDir);
+  float spot = smoothstep(uKeyCone.x, uKeyCone.y, cd);
+  spot *= spot;
+  return uKeyColor * spot / (dist * dist);
+}
+
+struct Surface {
+  vec3 P; vec3 N; vec3 V;
+  vec3 albedo;
+  float rough;
+  float metal;
+  float f0;
+  float wrap;        // diffuse wrap (subsurface softness)
+  float sheen;       // cloth sheen strength
+  float sheenRough;
+  float ao;
+  float shadowSoft;
+  float trans;       // thin-part transmission
+  float specMul;
+  float spec2;       // second, sharper specular lobe weight (skin oil, lacquer)
+};
+
+Surface surf(vec3 P, vec3 N, vec3 V) {
+  Surface s;
+  s.P = P; s.N = N; s.V = V;
+  s.albedo = vec3(0.5); s.rough = 0.5; s.metal = 0.0; s.f0 = 0.04;
+  s.wrap = 0.0; s.sheen = 0.0; s.sheenRough = 0.5; s.ao = 1.0;
+  s.shadowSoft = 1.0; s.trans = 0.0; s.specMul = 1.0; s.spec2 = 0.0;
+  return s;
+}
+
+vec3 directLobe(Surface s, vec3 L, vec3 E, float shadow, float areaR) {
+  float NoL = dot(s.N, L);
+  float NoV = max(dot(s.N, s.V), 1e-3);
+  vec3 H = normalize(L + s.V);
+  float NoH = sat(dot(s.N, H)), VoH = sat(dot(s.V, H));
+  float NoLc = sat(NoL);
+  float a = max(s.rough * s.rough, 0.0025);
+  float aL = sat(a + areaR);
+  vec3 F0 = mix(vec3(s.f0), s.albedo, s.metal);
+  vec3 F = F_Schlick(F0, VoH);
+  vec3 spec = D_GGX(NoH, aL) * V_SmithGGX(NoV, NoLc, aL) * F * (a * a) / (aL * aL);
+  if (s.spec2 > 0.0) {
+    float a2 = max(a * 0.45, 0.002);
+    float a2L = sat(a2 + areaR);
+    spec += s.spec2 * D_GGX(NoH, a2L) * V_SmithGGX(NoV, NoLc, a2L) * F * (a2 * a2) / (a2L * a2L);
+  }
+  float w = s.wrap;
+  float diffTerm = sat((NoL + w) / (1.0 + w)) / (1.0 + w);
+  vec3 diff = s.albedo * (1.0 - s.metal) * (1.0 - F) * diffTerm / PI;
+  vec3 sh = vec3(s.sheen * D_Charlie(NoH, s.sheenRough) * V_Neubelt(NoV, NoLc));
+  float tr = s.trans * pow(sat(dot(s.V, -L) * 0.5 + 0.5), 6.0) * 0.6;
+  return (diff + spec * NoLc * s.specMul + sh * NoLc + s.albedo * tr / PI) * E * shadow;
+}
+
+vec3 shade(Surface s) {
+  vec3 L; float dist;
+  vec3 E = keyLight(s.P, L, dist);
+  float shadow = 1.0;
+  if (E.x > 1e-5 && dot(s.N, L) > -0.35) shadow = shadowPCSS(s.P, s.N, s.shadowSoft);
+  else if (E.x <= 1e-5) shadow = 0.0;
+  // skin & cloth: the shadow terminator wraps softly instead of a hard edge
+  float areaR = uKeySize / (2.0 * dist);
+  vec3 col = directLobe(s, L, E, shadow, areaR);
+  // soft fills (no shadows), pooled around the table like the bounce from the stone & lamp
+  float pool = lightPool(s.P);
+  col += directLobe(s, uFillDir, uFillColor * pool, 1.0, 0.25);
+  col += directLobe(s, uRimDir, uRimColor * pool, 1.0, 0.15);
+  // ambient
+  float NoV = max(dot(s.N, s.V), 1e-3);
+  vec2 ab = envBRDF(NoV, s.rough);
+  vec3 F0 = mix(vec3(s.f0), s.albedo, s.metal);
+  vec3 R = reflect(-s.V, s.N);
+  col += ambientDiffuse(s.N) * s.albedo * (1.0 - s.metal) * s.ao * (0.35 + 0.65 * pool);
+  col += envRadiance(R, s.rough) * (F0 * ab.x + ab.y) * s.ao * s.specMul;
+  return col;
+}
+
+// Fragment output convention shared by every material.
+vec4 finalColor(vec3 col, vec3 P) {
+  return vec4(col, uPass == 1 ? max(P.y - uTableY, 0.0) : 1.0);
+}
+`;
+
+// Standard vertex shader: optional GPU skinning, world-space varyings.
+export const VERT = /* glsl */ `
+#include <skinning_pars_vertex>
+varying vec3 vW;
+varying vec3 vN;
+varying vec3 vL;
+varying vec3 vLN;
+#ifdef HAS_AUX
+attribute vec4 aAux;
+varying vec4 vAux;
+#endif
+#ifdef HAS_AUX3
+attribute vec3 aAux3;
+varying vec3 vAux3;
+#endif
+#ifdef BREATH
+uniform float uBreath;
+#endif
+void main() {
+  vec3 transformed = position;
+  vec3 objectNormal = normal;
+#ifdef BREATH
+  // chest expands, shoulders rise with each breath
+  float chest = smoothstep(0.10, 0.30, position.y) * (1.0 - smoothstep(0.46, 0.58, position.y));
+  float front = 0.55 + 0.45 * normal.z;
+  transformed += normal * uBreath * 0.0075 * chest * front;
+  transformed.y += uBreath * 0.0045 * smoothstep(0.30, 0.52, position.y);
+  transformed.z += uBreath * 0.004 * smoothstep(0.15, 0.45, position.y) * smoothstep(0.0, 0.1, position.z);
+#endif
+#include <skinbase_vertex>
+#include <skinnormal_vertex>
+#include <skinning_vertex>
+  vec4 wp = modelMatrix * vec4(transformed, 1.0);
+  vW = wp.xyz;
+  vN = normalize(mat3(modelMatrix) * objectNormal);
+  vL = position;
+  vLN = normal;
+#ifdef HAS_AUX
+  vAux = aAux;
+#endif
+#ifdef HAS_AUX3
+  vAux3 = aAux3;
+#endif
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+export const FRAG_HEAD = /* glsl */ `
+varying vec3 vW;
+varying vec3 vN;
+varying vec3 vL;
+varying vec3 vLN;
+#ifdef HAS_AUX
+varying vec4 vAux;
+#endif
+#ifdef HAS_AUX3
+varying vec3 vAux3;
+#endif
+`;
+
+// Every fragment shader starts with this: depth-only early out & mirror clipping.
+export const FRAG_PROLOGUE = /* glsl */ `
+  if (uPass == 2) { gl_FragColor = vec4(1.0); return; }
+  if (uPass == 1 && vW.y < uTableY - 0.0004) discard;
+  vec3 N = normalize(vN);
+  if (!gl_FrontFacing) N = -N;
+  vec3 V = normalize(cameraPosition - vW);
+  float fp = length(fwidth(vW));
+`;
