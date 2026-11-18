@@ -1,7 +1,7 @@
 // Game flow and choreography: who moves, what the hands do, where the heads look.
 import * as THREE from 'three';
 import { POSES, lerpPose } from './handModel.js';
-import { TABLE_Y, ROWS, ROW_Z, ROW_X0, ROW_DX, Pile, tableQuat, MATCH_R } from './world.js';
+import { TABLE_Y, TABLE_R, ROWS, ROW_Z, ROW_X0, ROW_DX, Pile, tableQuat, MATCH_R } from './world.js';
 import { chooseMove } from './nim.js';
 import { clamp, lerp, smoothstep, DEG, rand, rng, mulberry32, easeOutCubic } from './util.js';
 
@@ -11,12 +11,15 @@ const WORDS = ['none', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
 export class Director {
   constructor(ctx) {
     Object.assign(this, ctx); // sched, matches, player, opponent, ui, foley, camera
-    this.pHand = this.player.hands.left;
+    this.pHandL = this.player.hands.left;   // the hand in the shot: left and centre of the board
+    this.pHandR = this.player.hands.right;  // rests on his thigh, comes up for the right side
+    this.pHand = this.pHandL;               // whichever is working (look-at & focus follow it)
     this.oHand = this.opponent.hands.right;
     this.oSupport = this.opponent.hands.left;
     const pr = mulberry32(99);
     this.piles = {
       player: new Pile(new THREE.Vector3(0.078, TABLE_Y, 0.262), { x: 0.03, z: 0.018 }, pr),
+      playerL: new Pile(new THREE.Vector3(-0.268, TABLE_Y, 0.158), { x: 0.02, z: 0.016 }, pr),
       opponent: new Pile(new THREE.Vector3(-0.055, TABLE_Y, -0.29), { x: 0.03, z: 0.016 }, pr),
     };
     this.score = { player: 0, opponent: 0 };
@@ -49,23 +52,8 @@ export class Director {
         f[20] += Math.sin((1.8 - rub) * 9 + 1) * 6 * k;
       }
     };
-    // opponent's support hand: an occasional double tap of the index finger
-    let tap = -1, tapNext = 5, tapFinger = 0;
-    this.oSupport.idle = (dt, f) => {
-      tapNext -= dt;
-      if (tapNext <= 0 && tap < 0) { tap = 0; tapNext = 7 + rand(0, 9); tapFinger = rng() < 0.7 ? 0 : 1; }
-      if (tap >= 0) {
-        const prev = tap;
-        tap += dt;
-        const dur = 0.9;
-        const k = tap / dur;
-        const lift = Math.max(0, Math.sin(k * Math.PI * 2)) * (1 - k);
-        f[tapFinger * 4] -= lift * 26;
-        f[tapFinger * 4 + 1] -= lift * 6;
-        for (const hit of [0.5, 1.0]) if (prev / dur < hit && k >= hit) this.foley.tap(0.35, 0.25);
-        if (tap > dur) tap = -1;
-      }
-    };
+    // opponent's support hand carries his weight: braced flat on the stone, no fidgeting
+    this.oSupport.idle = null;
     // opponent's active hand: fingers resettle once in a while
     this.oHand.idle = (dt, f) => {
       const t = this.oHand.time;
@@ -192,14 +180,74 @@ export class Director {
     };
   }
 
+  // A hand resting below the stone (on the thigh) must clear the table edge first.
+  // The hand comes up beside the body, out to its own side, so the arm never folds
+  // across the shoulder on its way from the thigh to the stone.
+  edgePoint(hand) {
+    const a = hand.actor, S = hand.arm.S;
+    const f = new THREE.Vector3(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    const side = new THREE.Vector3(0, 1, 0).cross(f).multiplyScalar(hand.arm.s); // toward that arm's side
+    const p = S.clone().addScaledVector(side, 0.17).addScaledVector(f, 0.13);
+    p.y = TABLE_Y + 0.09;
+    const r = Math.hypot(p.x, p.z);
+    const rMin = TABLE_R + 0.06;
+    if (r < rMin) { p.x *= rMin / r; p.z *= rMin / r; }
+    return p;
+  }
+  // beside the thigh, clear of the leaning shoulder that hangs over the lap
+  sidePoint(hand) {
+    const a = hand.actor;
+    const f = new THREE.Vector3(Math.sin(a.yaw), 0, Math.cos(a.yaw));
+    const side = new THREE.Vector3(0, 1, 0).cross(f).multiplyScalar(hand.arm.s);
+    const p = hand.restWrist.clone().addScaledVector(side, 0.15).addScaledVector(f, 0.02);
+    p.y += 0.045;
+    return p;
+  }
+  async rise(hand) {
+    if (!hand.lapRest || hand.wrist.y > TABLE_Y + 0.05) return;
+    await hand.moveTo({ wrist: this.sidePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, arc: 0, poseWin: [0.0, 1], speed: 0.85, plant: 0 });
+    await hand.moveTo({ wrist: this.edgePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, arc: 0, poseWin: [0.2, 1], speed: 1.0 });
+  }
   async goRest(hand, speed = 1) {
+    if (hand.lapRest) {
+      await hand.moveTo({ wrist: this.edgePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, poseWin: [0.2, 1], speed: 0.9 * speed });
+      await hand.moveTo({ wrist: this.sidePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, arc: 0, poseWin: [0.2, 1], speed: 1.0 * speed });
+      await hand.moveTo({ wrist: hand.restWrist, quat: hand.restQuat, pose: hand.restPose, plant: 1, arc: 0, poseWin: [0.0, 1.0], speed: 0.85 * speed });
+      return;
+    }
     await hand.moveTo({ wrist: hand.restWrist, quat: hand.restQuat, pose: hand.restPose, plant: 1, poseWin: [0.3, 1.0], speed: 1.1 * speed });
     this.foley.tap(0.45, this.pan(hand.restWrist));
+  }
+
+  // How much extra lean a hand needs to work at these table points (its wrist sits behind the fingers).
+  handCost(hand, pts) {
+    const a = hand.actor, arm = hand.arm;
+    const base = a.baseLean + a.crouch.lean * a.posture.x;
+    let worst = 0;
+    for (const p of pts) {
+      const back = new THREE.Vector3(p.x - arm.S.x, 0, p.z - arm.S.z).normalize();
+      const w = p.clone().addScaledVector(back, -0.1);
+      w.y = TABLE_Y + 0.085;
+      worst = Math.max(worst, a.requiredLean(arm, w, a.twist.x, 1, base) - base);
+    }
+    return worst;
+  }
+  // The player uses the hand that can do the job with the least strain; the shot's left hand wins ties.
+  choosePlayerHand(pts) {
+    const cl = this.handCost(this.pHandL, [...pts, this.piles.playerL.center]);
+    const cr = this.handCost(this.pHandR, [...pts, this.piles.player.center]);
+    return cl <= cr + 0.06 ? this.pHandL : this.pHandR;
+  }
+  pileFor(hand) {
+    if (hand === this.pHandL) return this.piles.playerL;
+    if (hand === this.pHandR) return this.piles.player;
+    return this.piles.opponent;
   }
 
   async takeTurn(hand, list, pile) {
     this.foley.rustle(1, this.pan(hand.wrist));
     for (const m of list) m.state = 'taken';
+    await this.rise(hand);
     await this.gather(hand, list);
     await this.dropOnPile(hand, pile);
     await this.goRest(hand);
@@ -208,6 +256,7 @@ export class Director {
   // ---------------------------------------------------------------- rebuild at the end of a game
   async rebuild(hand, pile, slots, reverse) {
     const order = slots.slice().sort((a, b) => (reverse ? b.row - a.row : a.row - b.row) || a.col - b.col);
+    if (order.length && pile.items.length) await this.rise(hand);
     while (order.length) {
       const n = Math.min(4, order.length, pile.items.length);
       if (n === 0) break;
@@ -235,7 +284,7 @@ export class Director {
         await hand.moveTo({ tcp: at.clone().setY(at.y + 0.02), quat: q, pose: hand.held.length ? pose : POSES.reach, dur: 0.11, arc: 0, poseWin: [0, 1] });
       }
     }
-    await this.goRest(hand, 0.9);
+    if (slots.length) await this.goRest(hand, 0.9);
   }
 
   place(m, sp, slot) {
@@ -289,6 +338,19 @@ export class Director {
     }
     P.lookTarget.lerp(pl, Math.min(1, dt * 5));
     O.lookTarget.lerp(ol, Math.min(1, dt * 4));
+    // the opponent bends lowest while he studies the board
+    if (O.postureBase > 0) O.postureTarget = this.mode === 'ai-think' ? 1.0 : this.mode === 'rebuild' ? 0.8 : 0.9;
+  }
+
+  // where the lens should be focused: the board, or the hand at work
+  focusPoint() {
+    const board = this._board || (this._board = new THREE.Vector3(ROW_X0, TABLE_Y, (ROW_Z[0] + ROW_Z[3]) / 2));
+    const f = this._focus || (this._focus = new THREE.Vector3());
+    if (this.mode === 'select' && this.hover) return f.copy(this.hover.pos);
+    // the lens stays on the board, leaning a little toward the working hand
+    if (this.mode === 'player-move') return f.copy(board).lerp(this.pHand.displayWrist, 0.35);
+    if (this.mode === 'ai-move') return f.copy(board).lerp(this.oHand.displayWrist, 0.35);
+    return board;
   }
 
   // ---------------------------------------------------------------- player input
@@ -376,7 +438,9 @@ export class Director {
         this.setHover(null);
         this.ui.say('');
         this.mode = 'player-move';
-        await this.takeTurn(this.pHand, list, this.piles.player);
+        this.pHand = this.choosePlayerHand(list.map((m) => m.pos));
+        await this.takeTurn(this.pHand, list, this.pileFor(this.pHand));
+        this.pHand = this.pHandL;
       } else {
         this.mode = 'ai-think';
         this.ui.say('');
@@ -424,14 +488,23 @@ export class Director {
 
   async rebuildBoard() {
     const slots = this.matches.slots();
-    // nearer rows to whoever is nearer; counts follow each pile
-    const np = this.piles.player.items.length;
+    const P = this.piles;
+    // the player re-lays the rows nearest him, the opponent the far ones; counts follow the piles
+    const nL = P.playerL.items.length, nR = P.player.items.length;
     const byNear = slots.slice().sort((a, b) => b.row - a.row || a.col - b.col);
-    const mine = byNear.slice(0, np);
-    const theirs = byNear.slice(np);
-    await Promise.all([
-      this.rebuild(this.pHand, this.piles.player, mine, true),
-      this.rebuild(this.oHand, this.piles.opponent, theirs, false),
-    ]);
+    const mine = byNear.slice(0, nL + nR);
+    const theirs = byNear.slice(nL + nR);
+    // his left hand takes the leftmost of his slots, the right hand the rest
+    const x = (s) => this.matches.slotPose(s.row, s.col, false).pos.x;
+    mine.sort((a, b) => x(a) - x(b));
+    const left = mine.slice(0, nL), right = mine.slice(nL);
+    const playerSide = async () => {
+      this.pHand = this.pHandL;
+      await this.rebuild(this.pHandL, P.playerL, left, true);
+      this.pHand = this.pHandR;
+      await this.rebuild(this.pHandR, P.player, right, true);
+      this.pHand = this.pHandL;
+    };
+    await Promise.all([playerSide(), this.rebuild(this.oHand, P.opponent, theirs, false)]);
   }
 }

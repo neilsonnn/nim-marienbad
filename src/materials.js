@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { COMMON, VERT, FRAG_HEAD, FRAG_PROLOGUE } from './glsl.js';
 
-export const OCC_N = 34;
+export const OCC_N = 40;
 
 // Uniforms shared (by reference) across every material.
 export const G = {
@@ -22,6 +22,10 @@ export const G = {
   uFillColor: { value: new THREE.Vector3() },
   uRimDir: { value: new THREE.Vector3(0, 1, 0) },
   uRimColor: { value: new THREE.Vector3() },
+  uFacePos: { value: new THREE.Vector3(0, 10, 0) },
+  uFaceDir: { value: new THREE.Vector3(0, -1, 0) },
+  uFaceCone: { value: new THREE.Vector2(0.99, 0.999) },
+  uFaceColor: { value: new THREE.Vector3() },
   uAmbTop: { value: new THREE.Vector3() },
   uAmbBot: { value: new THREE.Vector3() },
   uEnvGain: { value: 1 },
@@ -81,25 +85,21 @@ void main() {
 ${FRAG_PROLOGUE}
   float nail = vAux.x, jAx = vAux.y, dorsal = vAux.z, thick = vAux.w;
   float nailEdge;
+  vec3 Ng = N;
+  float curv = curvature(Ng, vW);
   float h = skinHeight(vL, vW, nail, jAx, dorsal, fp, nailEdge);
   N = bumpNormal(vW, N, h);
-  Surface s = surf(vW, N, V);
   float mott = fbm3(vL * 160.0);
   float knuckle = exp(-(jAx * jAx) / (0.006 * 0.006)) * smoothstep(0.1, 0.6, dorsal);
-  vec3 alb = vec3(uSkinTone) * (0.86 + 0.24 * mott) * (1.0 - 0.10 * knuckle);
-  alb = mix(alb, vec3(uSkinTone * 1.28), nail);
-  // free edge of the nail is whiter
-  float tipW = smoothstep(0.85, 1.0, nail) * smoothstep(0.0, 0.004, -jAx) * 0.0;
-  alb += tipW;
-  s.albedo = alb;
-  s.rough = mix(0.50 - 0.08 * knuckle, 0.26, nail);
-  s.f0 = 0.028;
-  s.spec2 = mix(0.18, 0.6, nail);
-  s.wrap = 0.42;
-  s.shadowSoft = 1.8;
-  s.trans = clamp(1.6 - thick, 0.0, 1.0) * 0.7;
-  s.ao = 1.0 - 0.25 * smoothstep(0.0, -0.9, dorsal) * (1.0 - smoothstep(0.0, 0.01, abs(jAx)));
-  vec3 col = shade(s);
+  // skin colour kept in RGB so the scattering stays physical before the B&W print
+  vec3 alb = vec3(1.0, 0.72, 0.60) * (uSkinTone / 0.778) * (0.88 + 0.22 * mott);
+  alb.gb *= 1.0 - 0.16 * knuckle;                         // flushed knuckles
+  alb *= 1.0 - 0.10 * smoothstep(0.2, -0.8, dorsal);      // palms a touch ruddier
+  alb = mix(alb, vec3(1.0, 0.86, 0.82) * uSkinTone * 1.42, nail);
+  float thin = clamp(1.6 - thick, 0.0, 1.0);
+  float ao = 1.0 - 0.25 * smoothstep(0.0, -0.9, dorsal) * (1.0 - smoothstep(0.0, 0.01, abs(jAx)));
+  float rough = mix(0.56 - 0.08 * knuckle, 0.28, nail);
+  vec3 col = shadeSkin(vW, N, Ng, V, alb, rough, thin * 0.85, curv, ao, mix(0.10, 0.55, nail));
   gl_FragColor = finalColor(col, vW);
 }`,
     uniforms: { uSkinTone: { value: 0.30 } },
@@ -163,18 +163,38 @@ ${FRAG_PROLOGUE}
   float hair = vAux.x;
   // --- skin
   float h = (vnoise(vL * 2400.0) - 0.5) * 0.00003 * detail(0.0005, fp) + (vnoise(vL * 500.0) - 0.5) * 0.00006 * detail(0.002, fp);
-  // brows & lids (only really seen on the far player in portrait)
-  float brow = smoothstep(0.012, 0.0, abs(vL.y - 0.118 + 0.25 * vL.x * vL.x)) * step(0.06, vL.z) * smoothstep(0.052, 0.012, abs(vL.x) - 0.0) * step(0.008, abs(vL.x));
-  vec3 Ns = bumpNormal(vW, N, h);
-  Surface s = surf(vW, Ns, V);
-  s.albedo = vec3(uSkinTone) * (0.88 + 0.22 * fbm3(vL * 90.0)) * (1.0 - 0.75 * brow);
-  // eyes sit in shadowed sockets
-  float socket = smoothstep(0.022, 0.010, length(vec2(abs(vL.x) - 0.031, vL.y - 0.096))) * step(0.06, vL.z);
-  s.albedo *= 1.0 - 0.55 * socket;
-  float lip = smoothstep(0.004, 0.0, abs(vL.y - 0.034)) * smoothstep(0.022, 0.012, abs(vL.x)) * step(0.08, vL.z);
-  s.albedo *= 1.0 - 0.5 * lip;
-  s.rough = 0.48; s.f0 = 0.028; s.spec2 = 0.22; s.wrap = 0.45; s.shadowSoft = 1.8;
-  vec3 skinCol = shade(s);
+  vec3 p = vec3(abs(vL.x), vL.y, vL.z);
+  float front = step(0.05, vL.z);
+  // eyes: sclera, iris, pupil and a wet surface
+  vec3 eq = p - vec3(0.0315, 0.096, 0.073);
+  float er = length(eq);
+  float eye = smoothstep(0.0128, 0.0121, er) * front;
+  float cosA = eq.z / max(er, 1e-4);
+  float iris = smoothstep(0.86, 0.89, cosA);
+  float pupil = smoothstep(0.975, 0.982, cosA);
+  // lash line where the lids meet the eye, brows over the ridge
+  float lash = smoothstep(0.0022, 0.0, abs(er - 0.0131)) * smoothstep(0.0, 0.004, eq.y + 0.001) * front;
+  float browY = 0.1185 - 0.12 * (p.x - 0.028) * (p.x - 0.028) * 30.0;
+  float brow = smoothstep(0.005, 0.001, abs(p.y - browY)) * smoothstep(0.009, 0.013, p.x) * smoothstep(0.050, 0.042, p.x) * step(0.066, vL.z);
+  float browHairs = vnoise(vec3(p.x * 260.0, p.y * 180.0, 1.0));
+  // thin lips, a dark parting, a blue-grey shadow of beard along the jaw
+  float lips = smoothstep(0.0065, 0.003, abs(p.y - 0.031)) * smoothstep(0.024, 0.016, p.x) * step(0.083, vL.z);
+  float parting = smoothstep(0.0013, 0.0, abs(p.y - 0.031)) * smoothstep(0.025, 0.018, p.x) * step(0.09, vL.z);
+  float beard = smoothstep(0.045, 0.015, p.y) * smoothstep(0.035, 0.07, vL.z + p.x * 0.6) * (1.0 - lips) * smoothstep(-0.03, 0.0, p.y);
+  float earThin = vAux.z;
+  vec3 Ns = bumpNormal(vW, N, h * (1.0 - eye));
+  vec3 alb = vec3(1.0, 0.72, 0.60) * (uSkinTone / 0.778) * (0.88 + 0.22 * fbm3(vL * 90.0));
+  alb *= 1.0 - 0.18 * beard * (0.7 + 0.3 * vnoise(vL * 1500.0));
+  alb.gb *= 1.0 - 0.18 * lips;
+  alb *= 1.0 - 0.75 * parting;
+  alb *= 1.0 - 0.7 * brow * (0.8 + 0.2 * browHairs);
+  alb *= 1.0 - 0.7 * lash;
+  alb.gb *= 1.0 - 0.12 * earThin;   // ears are thin: they glow when light passes through
+  vec3 eyeAlb = mix(vec3(0.52, 0.5, 0.48), vec3(0.09, 0.1, 0.11), iris);
+  eyeAlb = mix(eyeAlb, vec3(0.01), pupil);
+  alb = mix(alb, eyeAlb, eye);
+  float rough = mix(0.5, 0.06, eye);
+  vec3 skinCol = shadeSkin(vW, Ns, N, V, alb, rough, earThin, curvature(N, vW), 1.0, mix(0.18, 3.0, eye));
 
   // --- hair: dark, slicked with pomade (Kajiya-Kay, two shifted lobes)
   vec3 T = normalize(vAux3 - N * dot(vAux3, N));
@@ -185,15 +205,19 @@ ${FRAG_PROLOGUE}
   float comb2 = vnoise(vec3(vL.x * 160.0, vL.y * 22.0 + 3.0, vL.z * 22.0));
   float shiftN = (strand - 0.5) * 0.22 * detail(0.0006, fp) + (comb - 0.5) * 0.30 * detail(0.0025, fp) + (comb2 - 0.5) * 0.2;
   vec3 hn = bumpNormal(vW, N, (comb - 0.5) * 0.00018 * detail(0.0025, fp) + (comb2 - 0.5) * 0.0003);
-  vec3 alb = vec3(0.022 + 0.014 * comb * comb2);
+  vec3 halb = vec3(0.022 + 0.014 * comb * comb2);
   vec3 L; float dist;
   vec3 E = keyLight(vW, L, dist);
   float sh = E.x > 1e-5 ? shadowPCSS(vW, N, 1.5) : 0.0;
-  vec3 hairCol = hairLight(vW, hn, V, T, L, E, sh, shiftN, alb);
+  vec3 hairCol = hairLight(vW, hn, V, T, L, E, sh, shiftN, halb);
   float pool = lightPool(vW);
-  hairCol += hairLight(vW, hn, V, T, uFillDir, uFillColor * pool, 1.0, shiftN, alb);
-  hairCol += hairLight(vW, hn, V, T, uRimDir, uRimColor * pool, 1.0, shiftN, alb);
-  hairCol += ambientDiffuse(hn) * alb + envRadiance(reflect(-V, hn), 0.6) * 0.012;
+  hairCol += hairLight(vW, hn, V, T, uFillDir, uFillColor * pool, 1.0, shiftN, halb);
+  hairCol += hairLight(vW, hn, V, T, uRimDir, uRimColor * pool, 1.0, shiftN, halb);
+  vec3 Lb; vec3 Eb = tableBounce(vW, Lb);
+  hairCol += hairLight(vW, hn, V, T, Lb, Eb, 1.0, shiftN, halb);
+  vec3 Lf; vec3 Ef = faceLight(vW, Lf);
+  hairCol += hairLight(vW, hn, V, T, Lf, Ef, 1.0, shiftN, halb);
+  hairCol += ambientDiffuse(hn) * halb + envRadiance(reflect(-V, hn), 0.6) * 0.012;
   vec3 col = mix(skinCol, hairCol, smoothstep(0.05, 0.95, hair));
   gl_FragColor = finalColor(col, vW);
 }`,
@@ -283,7 +307,7 @@ ${FRAG_PROLOGUE}
   h -= smoothstep(0.0006, 0.0, abs(fract(vL.y / 0.0028) - 0.5) * 0.0028) * 0.00002 * detail(0.0028, fp) * step(-0.008, vL.y);
   N = bumpNormal(vW, N, h);
   Surface s = surf(vW, N, V);
-  s.albedo = vec3(0.80) * (0.95 + 0.05 * vnoise(vL * 300.0));
+  s.albedo = vec3(0.86) * (0.95 + 0.05 * vnoise(vL * 300.0));
   s.rough = 0.78;
   s.sheen = 0.25;
   s.sheenRough = 0.5;
@@ -355,7 +379,9 @@ varying vec3 vLN;
 varying vec4 vRefl;
 void main() {
   vec4 wp = modelMatrix * vec4(position, 1.0);
-  vW = wp.xyz; vN = vec3(0.0, 1.0, 0.0); vL = position; vLN = normal;
+  vW = wp.xyz;
+  vN = normalize(mat3(modelMatrix) * normal);
+  vL = position; vLN = normal;
   vRefl = uReflMatrix * wp;
   gl_Position = projectionMatrix * viewMatrix * wp;
 }`,
@@ -377,7 +403,7 @@ float occlusion(vec3 P) {
     float bb = dot(ba, ba);
     float hh = bb > 0.0 ? clamp(dot(pa, ba) / bb, 0.0, 1.0) : 0.0;
     vec3 d = A.xyz + ba * hh - P;
-    float l2 = dot(d, d);
+    float l2 = max(dot(d, d), 1e-8);
     float r = A.w;
     float nd = sat(d.y * inversesqrt(l2));
     occ += nd * min(r * r / l2, 1.0) * B.w;
@@ -385,57 +411,100 @@ float occlusion(vec3 P) {
   return 1.0 - clamp(occ, 0.0, 0.92);
 }
 
+// Voronoi cells of the stone's crystals: F1, F2, and an id for the nearest crystal
+vec4 crystals(vec2 g) {
+  vec2 gi = floor(g), gf = fract(g);
+  float F1 = 9.0, F2 = 9.0, id = 0.0;
+  vec2 cell = vec2(0.0);
+  for (int j = -1; j <= 1; j++)
+    for (int i = -1; i <= 1; i++) {
+      vec2 o = vec2(float(i), float(j));
+      vec2 h = vec2(hash12(gi + o), hash12(gi + o + 17.31));
+      vec2 r = o + h - gf;
+      float d = dot(r, r);
+      if (d < F1) { F2 = F1; F1 = d; id = hash12(gi + o + 5.17); cell = gi + o; }
+      else if (d < F2) F2 = d;
+    }
+  return vec4(sqrt(F1), sqrt(F2), id, hash12(cell + 91.7));
+}
+
 void main() {
 ${FRAG_PROLOGUE}
+  vec3 Ng = N;
+  float flatTop = smoothstep(0.985, 0.9995, Ng.y);
   vec2 q = vW.xz;
-  float rr = length(q);
-  // black Belgian marble: faint clouds, quartz flecks and the odd fossil vein
-  float n1 = fbm2(q * 4.0 + 3.0);
-  float n2 = fbm2(q * 19.0 + 11.0);
-  float n3 = vnoise2(q * 210.0);
-  float fleck = smoothstep(0.80, 0.97, vnoise2(q * 520.0)) * detail(0.004, fp);
-  float vf = fbm2(q * 2.3 + vec2(n1, n2) * 0.9);
-  float vein = smoothstep(0.03, 0.0, abs(vf - 0.5)) * (0.5 + n2);
-  float alb = 0.010 + 0.009 * n2 + 0.012 * n3 * detail(0.006, fp) + 0.008 * fleck + 0.006 * vein * n1;
-  // the polish is a little hazier where hands have rested for years
-  float wear = exp(-pow(length(q - vec2(-0.16, 0.14)) / 0.11, 2.0)) + exp(-pow(length(q - vec2(0.03, -0.29)) / 0.13, 2.0));
-  float haze = smoothstep(0.35, 0.85, fbm2(q * 6.5 + 2.0));
-  float rough = 0.05 + 0.07 * haze + 0.035 * wear + 0.02 * n3;
-  // slight waviness of the hand-polished slab
-  float h = (fbm2(q * 2.7) - 0.5) * 0.0009 + (n2 - 0.5) * 0.00006 + (vnoise2(q * 900.0) - 0.5) * 0.000008 * detail(0.0011, fp);
-  N = bumpNormal(vW, vec3(0.0, 1.0, 0.0), h);
 
+  // ---- polished black granite
+  vec2 warp = vec2(fbm2(q * 3.1 + 1.7), fbm2(q * 3.1 + 9.2));
+  float cloud = fbm2(q * 5.5 + warp * 1.8);
+  float cloud2 = fbm2(q * 17.0 + warp * 0.6 + 4.0);
+  vec4 cr = crystals(q * 480.0);
+  float grain = detail(1.0 / 480.0, fp);
+  float crystalTone = (cr.z - 0.5) * grain;
+  float boundary = smoothstep(0.10, 0.0, cr.y - cr.x) * grain;
+  // calcite threads drifting through the stone
+  float vf = fbm2(q * 1.6 + warp * 1.2 + 21.0);
+  float vein = smoothstep(0.010, 0.0, abs(vf - 0.53)) * 0.7 + smoothstep(0.005, 0.0, abs(fbm2(q * 3.7 + warp + 7.0) - 0.5)) * 0.35;
+  vein *= smoothstep(0.35, 0.7, fbm2(q * 2.0 + 3.0));
+  // mica flakes catching the lamp
+  float mica = step(0.955, cr.w) * smoothstep(0.42, 0.05, cr.x) * grain;
+  float alb = 0.0075 + 0.020 * cloud * cloud + 0.005 * cloud2 + 0.007 * crystalTone - 0.003 * boundary + 0.010 * vein + 0.015 * mica;
+
+  // ---- the polish: haze, hand-worn smudges, rotary polishing swirls
+  float haze = smoothstep(0.35, 0.85, fbm2(q * 6.5 + 2.0));
+  float wear = exp(-pow(length(q - vec2(-0.16, 0.14)) / 0.11, 2.0)) + exp(-pow(length(q - vec2(0.03, -0.29)) / 0.13, 2.0));
+  float smudge = smoothstep(0.62, 0.78, fbm2(q * 24.0 + warp * 3.0)) * (0.3 + wear);
+  vec2 sc = q * 7.0;
+  vec2 si = floor(sc);
+  vec2 ctr = si + vec2(hash12(si + 2.3), hash12(si + 7.9));
+  float sr = length(sc - ctr) / 7.0;
+  float swirlMask = smoothstep(0.55, 0.85, vnoise2(q * 11.0 + 5.0)) * detail(0.0012, fp);
+  float swirl = smoothstep(0.86, 1.0, abs(sin(sr * 2600.0 + hash12(si) * 40.0))) * swirlMask;
+  float rough = 0.036 + 0.075 * haze + 0.035 * wear + 0.05 * smudge + 0.02 * cloud2 + 0.05 * swirl;
+
+  // ---- micro-relief: orange peel of the hand-polished slab + swirl furrows
+  float h = (fbm2(q * 2.7) - 0.5) * 0.0007 + (cloud2 - 0.5) * 0.00004 - swirl * 0.0000025 - boundary * 0.0000015;
+  N = bumpNormal(vW, Ng, h);
   float dist = length(cameraPosition - vW);
   float NoV = max(dot(N, V), 1e-3);
 
-  // ---- planar reflection, blurred by roughness x distance-to-surface
-  vec2 ruv = vRefl.xy / vRefl.w;
-  ruv += (N.xz - vec2(0.0)) * 0.5 * (1.0 / dist);
-  vec4 r0 = textureLod(uReflTex, ruv, 1.0);
+  // ---- planar reflection, blurred only by roughness x height above the stone
+  vec2 ruv = vRefl.xy / vRefl.w + (N.xz - Ng.xz) * (0.25 / dist);
+  vec4 r0 = textureLod(uReflTex, ruv, 0.0);
   float hgt = min(r0.a, 0.6);
-  float blurW = 0.0007 + hgt * (rough * 0.55 + 0.012);
+  float blurW = 0.0003 + hgt * (rough * 0.14 + 0.0018);
   float px = blurW * uReflScale / dist;
-  float lod = clamp(log2(max(px, 1.0)), 0.0, 6.0);
+  float lod = clamp(log2(max(px, 1.0)), 0.0, 5.0);
   vec2 tx = vec2(px) / vec2(textureSize(uReflTex, 0));
   vec3 refl = textureLod(uReflTex, ruv, lod).rgb * 0.4;
-  refl += textureLod(uReflTex, ruv + vec2(tx.x, 0.0) * 0.6, lod).rgb * 0.15;
-  refl += textureLod(uReflTex, ruv - vec2(tx.x, 0.0) * 0.6, lod).rgb * 0.15;
-  refl += textureLod(uReflTex, ruv + vec2(0.0, tx.y) * 0.6, lod).rgb * 0.15;
-  refl += textureLod(uReflTex, ruv - vec2(0.0, tx.y) * 0.6, lod).rgb * 0.15;
-  float F = 0.04 + 0.96 * pow5(1.0 - NoV);
-  float reflAmt = F * uReflGain * (1.0 - rough * 2.0);
+  refl += textureLod(uReflTex, ruv + vec2(tx.x, tx.y) * 0.5, lod).rgb * 0.15;
+  refl += textureLod(uReflTex, ruv + vec2(-tx.x, tx.y) * 0.5, lod).rgb * 0.15;
+  refl += textureLod(uReflTex, ruv + vec2(tx.x, -tx.y) * 0.5, lod).rgb * 0.15;
+  refl += textureLod(uReflTex, ruv - vec2(tx.x, tx.y) * 0.5, lod).rgb * 0.15;
+  float F = 0.045 + 0.955 * pow5(1.0 - NoV);
+  float reflAmt = F * uReflGain * (1.0 - rough * 2.2) * flatTop;
 
   Surface s = surf(vW, N, V);
   s.albedo = vec3(alb);
   s.rough = rough;
   s.f0 = 0.045;
-  s.shadowSoft = 1.0;
   s.ao = occlusion(vW);
-  s.specMul = 0.75 + 0.6 * haze;
+  s.specMul = 0.6 + 1.3 * haze + 0.6 * smudge;
   vec3 col = shade(s);
   col *= mix(1.0, s.ao, 0.7);
   col += refl * reflAmt;
-  // fade toward the bevel: the chrome band takes over
+
+  // ---- mica glints: each flake is a tiny tilted mirror
+  vec3 L; float ld;
+  vec3 E = keyLight(vW, L, ld);
+  vec3 Nf = normalize(Ng + vec3(hash12(vec2(cr.w, 3.3)) - 0.5, 0.0, hash12(vec2(cr.w, 8.8)) - 0.5) * 0.5);
+  float glint = pow(sat(dot(Nf, normalize(L + V))), 900.0) * mica;
+  col += vec3(glint * 0.6) * E * s.ao;
+
+  // ---- the bullnose edge mirrors the room (the planar reflection only holds on the flat)
+  vec3 R = reflect(-V, N);
+  float Fe = 0.045 + 0.955 * pow5(1.0 - NoV);
+  col += envRadiance(R, 0.05) * Fe * 2.2 * (1.0 - flatTop);
   gl_FragColor = finalColor(col, vW);
 }`,
   });
@@ -452,14 +521,16 @@ uniform float uRough;
 uniform float uBrush;
 void main() {
 ${FRAG_PROLOGUE}
-  // fine circumferential polishing marks
+  // circumferential brushing on flat faces, beads left polished
   float ang = atan(vW.z, vW.x);
-  float h = (vnoise(vec3(ang * 900.0, vW.y * 40.0, 0.0)) - 0.5) * 0.000012 * uBrush;
+  float face = smoothstep(0.35, 0.1, abs(N.y)) * uBrush;
+  float brush = vnoise(vec3(ang * 1400.0, vW.y * 3000.0, 0.0));
+  float h = (brush - 0.5) * 0.000006 * face * detail(0.0006, fp);
   N = bumpNormal(vW, N, h);
   Surface s = surf(vW, N, V);
-  s.albedo = vec3(uAlb);
+  s.albedo = vec3(uAlb) * (1.0 - 0.06 * face * brush);
   s.metal = 1.0;
-  s.rough = uRough + 0.03 * vnoise(vW * 200.0);
+  s.rough = uRough + 0.11 * face + 0.03 * vnoise(vW * 200.0) + 0.04 * face * (brush - 0.5);
   s.shadowSoft = 1.0;
   vec3 col = shade(s);
   gl_FragColor = finalColor(col, vW);

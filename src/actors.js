@@ -1,18 +1,28 @@
 // Bodies, arms and hands: everything that moves procedurally.
 import * as THREE from 'three';
 import { HandRig, POSES, CONTACT_POINTS, lerpPose, POSE_SIZE, B_PALM, FINGER_BONES, THUMB_BONES } from './handModel.js';
-import { Sleeve, torsoGeometry, headGeometry, collarGeometry, cuffGeometry, cufflinkGeometry, legsGeometry, SHOULDER_L, NECK_PIVOT } from './bodyModel.js';
+import { Sleeve, torsoGeometry, headGeometry, collarGeometry, cuffGeometry, cufflinkGeometry, SHOULDER_L, NECK_PIVOT } from './bodyModel.js';
 import { clamp, lerp, smoothstep, minJerk, noise1, fnoise, Spring, DEG, quatFromYZ, rand } from './util.js';
-import { TABLE_Y, TABLE_R, L_NO_MIRROR, L_MAIN_ONLY } from './world.js';
+import { TABLE_Y, TABLE_R, L_NO_MIRROR, L_MAIN_ONLY, L_NO_SHADOW } from './world.js';
+// (REACH_SOFT / REACH_MAX defined below with the solver)
 
 const UP = new THREE.Vector3(0, 1, 0);
 const AXIS_X = new THREE.Vector3(1, 0, 0), AXIS_Y = new THREE.Vector3(0, 1, 0), AXIS_Z = new THREE.Vector3(0, 0, 1);
 const _qT = new THREE.Quaternion();
+const _qFlip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+const _qIdent = new THREE.Quaternion();
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
 const _m1 = new THREE.Matrix4();
 
 // ------------------------------------------------------------------ two-bone IK
+// Reach is soft-limited: the arm eases toward (but never reaches) a locked-straight
+// elbow, so there is always a little kink and no visible snap at full extension.
+export const REACH_SOFT = 0.9, REACH_MAX = 0.972;
+export function softReach(len, L) {
+  const s = L * REACH_SOFT, m = L * REACH_MAX;
+  return len <= s ? len : s + (m - s) * Math.tanh((len - s) / (m - s));
+}
 export function solveTwoBone(S, W, L1, L2, poleDir, outE, outW) {
   const d = _v1.subVectors(W, S);
   const len = d.length();
@@ -53,6 +63,46 @@ class Arm {
     this.pole = new THREE.Vector3();
     this.protract = new Spring(0, 0.3);
     this.protractTarget = 0;
+    // elbow direction (perpendicular to shoulder->wrist), smoothed in world space so it never pops
+    this.swivel = new Spring(0, 0.11); // kept for diagnostics: angle of the elbow from its pole
+    this.elbowDir = new THREE.Vector3();
+    this._hasElbow = false;
+    this._cand = new THREE.Vector3();
+    this._best = new THREE.Vector3();
+    this._prevDir = new THREE.Vector3();
+    this._qPT = new THREE.Quaternion();
+    this._prevE = new THREE.Vector3();
+    this._u = new THREE.Vector3();
+    this._w = new THREE.Vector3();
+    this._p = new THREE.Vector3();
+    this._dir = new THREE.Vector3();
+  }
+  // How far the elbow / forearm / upper arm sink into the body for a swivel angle.
+  _penetration(dir, a, h, u, w, ang) {
+    const body = this.actor.bodySpheres;
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    // elbow
+    const ex = this.S.x + dir.x * a + h * (u.x * ca + w.x * sa);
+    const ey = this.S.y + dir.y * a + h * (u.y * ca + w.y * sa);
+    const ez = this.S.z + dir.z * a + h * (u.z * ca + w.z * sa);
+    let pen = 0;
+    // sample the upper arm (beyond the shoulder cap), the elbow and the forearm
+    const samples = [[0.62, 0.05], [1.0, 0.05], [1.3, 0.045], [1.65, 0.042]];
+    for (const [t, r] of samples) {
+      let px, py, pz;
+      if (t <= 1) { px = this.S.x + (ex - this.S.x) * t; py = this.S.y + (ey - this.S.y) * t; pz = this.S.z + (ez - this.S.z) * t; }
+      else {
+        const k = (t - 1) / 1.0; // fraction along the forearm toward the wrist
+        px = ex + (this.W.x - ex) * k; py = ey + (this.W.y - ey) * k; pz = ez + (this.W.z - ez) * k;
+      }
+      for (const b of body) {
+        const dx = px - b.x, dy = py - b.y, dz = pz - b.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const o = b.r + r - d;
+        if (o > 0) pen += o * o;
+      }
+    }
+    return pen;
   }
   // shoulder joint in torso space; reaching protracts the shoulder blade forward
   shoulderLocal(out, protract = this.protract.x) {
@@ -62,10 +112,56 @@ class Arm {
   shoulder(out) {
     return this.shoulderLocal(out).applyMatrix4(this.actor.torsoMatrix);
   }
-  solve(Wt) {
+  solve(Wt, dt = 0) {
     this.shoulder(this.S);
     this.pole.copy(this.poleLocal).transformDirection(this.actor.torsoMatrix);
-    return solveTwoBone(this.S, Wt, this.L1, this.L2, this.pole, this.E, this.W);
+    const L = this.L1 + this.L2;
+    const dir = this._dir.subVectors(Wt, this.S);
+    const len = Math.max(dir.length(), 1e-6);
+    dir.multiplyScalar(1 / len);
+    const reach = Math.max(softReach(len, L), Math.abs(this.L1 - this.L2) + 0.02);
+    this.W.copy(this.S).addScaledVector(dir, reach);
+    const a = (this.L1 * this.L1 - this.L2 * this.L2 + reach * reach) / (2 * reach);
+    const h = Math.sqrt(Math.max(this.L1 * this.L1 - a * a, 0));
+    // pole direction: where the elbow wants to point (out and down from the body)
+    const pole = this._p.copy(this.pole).addScaledVector(dir, -this.pole.dot(dir));
+    if (pole.lengthSq() < 1e-6) pole.set(0, -1, 0).addScaledVector(dir, dir.y);
+    pole.normalize();
+    // current elbow direction carried along with the arm (parallel transport), so a big
+    // change in reach direction rotates the elbow with it instead of re-projecting it
+    const cur = this.elbowDir;
+    if (!this._hasElbow) { cur.copy(pole); this._prevDir.copy(dir); this._hasElbow = true; }
+    // a folded arm's elbow simply stays where it hangs; only an extended arm carries it round
+    const extended = smoothstep(0.28, 0.55, len / L);
+    this._qPT.setFromUnitVectors(this._prevDir, dir);
+    if (extended < 1) this._qPT.slerp(_qIdent, 1 - extended);
+    cur.applyQuaternion(this._qPT);
+    this._prevDir.copy(dir);
+    cur.addScaledVector(dir, -cur.dot(dir));
+    if (cur.lengthSq() < 1e-6) cur.copy(pole);
+    cur.normalize();
+    if (dt > 0) {
+      // candidates swing the elbow around the shoulder-wrist axis from where it is now
+      const u = cur, w = this._w.crossVectors(dir, cur);
+      const best = this._best.copy(cur);
+      let bc = Infinity;
+      for (let i = -16; i <= 16; i++) {
+        const ang = i * 0.1;
+        const c = this._cand.copy(u).multiplyScalar(Math.cos(ang)).addScaledVector(w, Math.sin(ang));
+        const dev = Math.acos(clamp(c.dot(pole), -1, 1));
+        const cost = this._penetration(dir, a, h, u, w, ang) * 4000 + dev * dev * (0.12 + 0.5 * (1 - extended)) + ang * ang * 0.08;
+        if (cost < bc) { bc = cost; best.copy(c); }
+      }
+      // ease toward it (time-based, never instantaneous) with a cap on angular speed
+      this._prevE.copy(cur);
+      cur.lerp(best, 1 - Math.exp(-dt / 0.16)).addScaledVector(dir, -cur.dot(dir)).normalize();
+      const turn = Math.acos(clamp(cur.dot(this._prevE), -1, 1));
+      const maxTurn = 3.2 * dt;
+      if (turn > maxTurn) cur.copy(this._prevE).lerp(cur, maxTurn / turn).addScaledVector(dir, -cur.dot(dir)).normalize();
+      this.swivel.x = Math.acos(clamp(cur.dot(pole), -1, 1));
+    }
+    this.E.copy(this.S).addScaledVector(dir, a).addScaledVector(cur, h);
+    return len - reach; // > 0 means the hand could not reach
   }
   forearmFrame(dorsal) {
     const y = _v3.subVectors(this.W, this.E).normalize();
@@ -76,15 +172,18 @@ class Arm {
   }
   updateMeshes() {
     const refUp = _v1.set(0, 0, 1).applyQuaternion(this.foreQuat);
-    this.sleeve.build(this.S, this.E, this.W, refUp, { endBack: 0.034 });
+    this.sleeve.build(this.S, this.E, this.W, refUp, { endBack: 0.040, rWrist: 0.0405 });
     // cuff sits just behind the wrist joint, a cufflink on the outer side
     _m1.compose(this.W, this.foreQuat, ONE);
-    _v2.set(0, -0.0035, 0).applyMatrix4(_m1);
-    this.cuff.matrix.compose(_v2, this.foreQuat, ONE);
-    this.cuff.matrixWorldNeedsUpdate = true;
     const outward = this.actor.handOuterSign(this);
-    _v2.set(outward * 0.0312, -0.025, 0.0).applyMatrix4(_m1);
-    this.link.matrix.compose(_v2, this.foreQuat, ONE);
+    // the cuff's seam and link face the outside of the wrist
+    _q1.copy(this.foreQuat);
+    if (outward < 0) _q1.multiply(_qFlip);
+    _v2.set(0, -0.0012, 0).applyMatrix4(_m1);
+    this.cuff.matrix.compose(_v2, _q1, ONE);
+    this.cuff.matrixWorldNeedsUpdate = true;
+    _v2.set(outward * 0.0372, -0.022, 0.0).applyMatrix4(_m1);
+    this.link.matrix.compose(_v2, _q1, ONE);
     this.link.matrixWorldNeedsUpdate = true;
   }
 }
@@ -140,6 +239,8 @@ export class HandController {
     this.restPose = POSES.relaxed;
     this.onTap = null;
     this._W = new THREE.Vector3();
+    this.brace = false; // weight-bearing: locked to the stone, no tremor or fidget
+    this._dt = 0;
   }
 
   setRest(wrist, quat, pose) {
@@ -190,7 +291,7 @@ export class HandController {
       toQ: quat,
       fromPose: new Float32Array(this.basePose),
       toPose: new Float32Array(pose),
-      arc: o.arc ?? Math.min(0.06, dist * 0.35),
+      arc: o.arc ?? Math.min(0.04, dist * 0.3),
       poseWin: o.poseWin ?? [0.15, 0.85],
       plant: o.plant ?? 0,
       onUpdate: o.onUpdate,
@@ -302,33 +403,52 @@ export class HandController {
     // ---- idle life
     const tn = this.time + this.seed;
     this.fidget.fill(0);
+    const fid = this.brace && !this.seg ? 0.15 : 1;
     for (let f = 0; f < 4; f++) {
-      const n = fnoise(tn * 0.23 + f * 3.1, 2);
+      const n = fnoise(tn * 0.23 + f * 3.1, 2) * fid;
       this.fidget[f * 4] = n * 3.2;
-      this.fidget[f * 4 + 1] = n * 2.6 + noise1(tn * 0.7 + f) * 0.8;
+      this.fidget[f * 4 + 1] = n * 2.6 + noise1(tn * 0.7 + f) * 0.8 * fid;
       this.fidget[f * 4 + 2] = n * 1.5;
     }
-    this.fidget[16] = fnoise(tn * 0.19 + 9, 2) * 3;
-    this.fidget[19] = fnoise(tn * 0.21 + 4, 2) * 3;
+    this.fidget[16] = fnoise(tn * 0.19 + 9, 2) * 3 * fid;
+    this.fidget[19] = fnoise(tn * 0.21 + 4, 2) * 3 * fid;
     if (this.idle && !this.seg) this.idle(dt, this.fidget);
     for (let i = 0; i < POSE_SIZE; i++) this.pose[i] = this.basePose[i] + this.fidget[i];
 
     // ---- tremor & breathing coupling
-    const trem = 0.00035 * (0.25 + airborne) * (1 - this.planted * 0.85);
+    const trem = this.brace && !this.seg ? 0 : 0.00035 * (0.25 + airborne) * (1 - this.planted * 0.85);
+    this._dt = dt;
     const W = this._W.copy(this.wrist);
     W.x += noise1(tn * 2.1) * trem;
     W.y += noise1(tn * 2.3 + 7) * trem + this.planted * -0.004; // planted hands press into contact
     W.z += noise1(tn * 1.9 + 3) * trem;
 
+    // ---- the hand keeps clear of its own owner's face
+    const sp = a.bodySpheres;
+    if (sp && sp.length > 3) {
+      for (const k of [3, 5]) {
+        const b = sp[k];
+        const dx = W.x - b.x, dy = W.y - b.y, dz = W.z - b.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz), min = b.r + 0.05;
+        if (d < min && d > 1e-5) { const s = min / d; W.x = b.x + dx * s; W.y = b.y + dy * s; W.z = b.z + dz * s; }
+      }
+    }
     this._pose(W);
     // ---- table contact (never penetrate; planted hands settle onto it)
     const pen = this._penetration();
     if (pen > 0) {
       W.y += pen;
-      this._pose(W);
+      this._pose(W, true);
     }
     this.displayWrist.copy(this.arm.W);
     this.lift = pen;
+    if (this.lapRest && this.rig.mesh) {
+      const below = this.displayWrist.y < TABLE_Y - 0.04;
+      if (below !== this._below) {
+        this._below = below;
+        this.rig.mesh.layers.set(below ? L_MAIN_ONLY : 0);
+      }
+    }
 
     // ---- held matches follow the pinch
     for (const h of this.held) {
@@ -357,9 +477,9 @@ export class HandController {
     return { p, q };
   }
 
-  _pose(W) {
+  _pose(W, second = false) {
     const arm = this.arm;
-    arm.solve(W);
+    arm.solve(W, second ? 0 : this._dt);
     const D = _v2.set(0, 0, 1).applyQuaternion(this.quat);
     const fq = arm.forearmFrame(D);
     const g = this.rig.group;
@@ -432,30 +552,45 @@ export class Actor {
     this.extraLean = 0;
     this.maxExtraLean = cfg.maxExtraLean ?? 0.45;
     this.twistGain = cfg.twistGain ?? 0.34;
+    this.reachSlide = cfg.reachSlide ?? 0;
+    // posture: 0 = the authored stance, 1 = bent low over the board (hips down, deeper lean)
+    this.postureBase = cfg.posture ?? 0;
+    this.posture = new Spring(cfg.posture ?? 0, 1.1);
+    this.postureTarget = cfg.posture ?? 0;
+    this.crouch = cfg.crouch || { drop: 0, fwd: 0, lean: 0 };
+    this.bodySpheres = [];
+    this._sph = Array.from({ length: 6 }, () => ({ x: 0, y: 0, z: 0, r: 0 }));
 
     this.clothMat = mats.jacket;
     this.torso = new THREE.Mesh(torsoGeometry(), mats.jacket);
     this.torso.matrixAutoUpdate = false;
     this.torso.frustumCulled = false;
-    this.torso.layers.set(L_NO_MIRROR);
+    // the seated player sits outside the lamp's pool: his body needs no shadow pass
+    const bodyLayer = cfg.castsBody === false ? L_MAIN_ONLY : cfg.mirrorBody ? L_NO_SHADOW : L_NO_MIRROR;
+    this.torso.layers.set(bodyLayer);
     scene.add(this.torso);
     this.headMat = mats.head;
-    this.head = new THREE.Mesh(headGeometry(), mats.head);
+    this.head = new THREE.Mesh(headGeometry(cfg.headCell), mats.head);
     this.head.frustumCulled = false;
     this.head.matrixAutoUpdate = false;
-    this.head.layers.set(L_NO_MIRROR);
+    this.head.layers.set(bodyLayer);
     scene.add(this.head);
     this.collar = new THREE.Mesh(collarGeometry(), mats.shirt);
     this.collar.matrixAutoUpdate = false;
-    this.collar.layers.set(L_NO_MIRROR);
+    this.collar.layers.set(cfg.mirrorBody ? L_NO_SHADOW : L_NO_MIRROR);
     scene.add(this.collar);
-    this.legs = new THREE.Mesh(legsGeometry(!!cfg.seated), mats.sleeve);
-    this.legs.position.copy(this.hip);
-    this.legs.rotation.y = this.yaw;
-    this.legs.updateMatrix();
-    this.legs.matrixAutoUpdate = false;
-    this.legs.layers.set(L_MAIN_ONLY);
-    scene.add(this.legs);
+    // trouser legs: two-bone IK from the (moving) hips to feet planted on the floor
+    this.seated = !!cfg.seated;
+    this.legs = [-1, 1].map((s) => {
+      const tube = new Sleeve(mats.sleeve, s > 0 ? 11 : 13);
+      tube.mesh.layers.set(L_MAIN_ONLY);
+      scene.add(tube.mesh);
+      const f = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+      const left = new THREE.Vector3(0, 1, 0).cross(f);
+      const ankle = this.hip.clone().addScaledVector(left, s * 0.105).addScaledVector(f, this.seated ? 0.46 : 0.03);
+      ankle.y = 0.085;
+      return { s, tube, ankle, H: new THREE.Vector3(), K: new THREE.Vector3(), A: new THREE.Vector3(), f, left };
+    });
 
     this.arms = {};
     this.hands = {};
@@ -482,18 +617,28 @@ export class Actor {
     q.multiply(_qT.setFromAxisAngle(AXIS_Y, twist));
     q.multiply(_qT.setFromAxisAngle(AXIS_Z, roll));
     const hip = _v1.copy(this.hip);
+    const pk = this.posture.x;
+    if (this.reachSlide) {
+      // a seated reach slides forward on the chair as the lean runs out
+      const over = clamp((lean - this.baseLean - this.maxExtraLean * 0.45) / (this.maxExtraLean * 0.55), 0, 1);
+      hip.x += Math.sin(this.yaw) * this.reachSlide * over;
+      hip.z += Math.cos(this.yaw) * this.reachSlide * over;
+    }
+    hip.y -= this.crouch.drop * pk;
+    _v2.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    hip.addScaledVector(_v2, this.crouch.fwd * pk);
     hip.x += fnoise(this.time * 0.05 + this.seed, 2) * 0.006;
     hip.z += fnoise(this.time * 0.04 + this.seed + 5, 2) * 0.004;
     return out.compose(hip, this.torsoQuat, ONE);
   }
 
   // smallest lean that lets `arm` reach the wrist target (with protraction & twist)
-  requiredLean(arm, Wt, twist, protract) {
-    const reach = (arm.L1 + arm.L2) * 0.975;
+  requiredLean(arm, Wt, twist, protract, minLean = this.baseLean) {
+    const reach = (arm.L1 + arm.L2) * (REACH_SOFT - 0.01);
     const tmp = this._tmpM || (this._tmpM = new THREE.Matrix4());
     const S = this._tmpS || (this._tmpS = new THREE.Vector3());
-    const max = this.baseLean + this.maxExtraLean;
-    for (let l = this.baseLean; l < max; l += 0.015) {
+    const max = minLean + this.maxExtraLean;
+    for (let l = minLean; l < max; l += 0.012) {
       this.computeTorso(l, twist, 0, tmp);
       arm.shoulderLocal(S, protract).applyMatrix4(tmp);
       if (S.distanceTo(Wt) <= reach) return l;
@@ -513,8 +658,13 @@ export class Actor {
     this.breath = shaped * this.breathDepth * (1 + this.sigh * 1.6);
     this.clothMat.uniforms.uBreath.value = this.breath;
 
+    // ---- posture
+    this.posture.update(this.postureTarget, dt);
+    const base = this.baseLean + this.crouch.lean * this.posture.x;
+
     // ---- reaching: shoulder protraction first, then torso twist, then lean
-    let lean = this.baseLean + this.extraLean - this.breath * 0.006;
+    let lean = base + this.extraLean - this.breath * 0.006;
+    let leanNow = 0;
     let twist = fnoise(t * 0.03 + this.seed, 2) * 0.02;
     for (const side in this.hands) {
       const h = this.hands[side];
@@ -526,15 +676,16 @@ export class Actor {
       arm.protractTarget = demand;
       const tw = -arm.s * this.twistGain * demand;
       twist += tw;
-      lean = Math.max(lean, this.requiredLean(arm, target, this.twist.x * 0.5 + tw * 0.5, demand));
-      lean = Math.max(lean, this.requiredLean(arm, h.wrist, this.twist.x, arm.protract.x));
+      lean = Math.max(lean, this.requiredLean(arm, target, this.twist.x * 0.5 + tw * 0.5, demand, base));
+      // the body must already be far enough over for where the hand is right now
+      leanNow = Math.max(leanNow, this.requiredLean(arm, h.wrist, this.twist.x, arm.protract.x, base));
     }
     for (const side in this.arms) {
       const arm = this.arms[side];
       arm.protract.update(arm.protractTarget, dt);
     }
-    this.lean.update(lean, dt);
-    if (this.lean.x < lean - 0.1) this.lean.x = lean - 0.1;
+    this.lean.update(Math.max(lean, leanNow), dt);
+    if (this.lean.x < leanNow) { this.lean.x = leanNow; this.lean.v = Math.max(this.lean.v, 0); }
     this.twist.update(twist, dt);
     this.roll.update(fnoise(t * 0.04 + this.seed + 2, 2) * 0.015 - this.twist.x * 0.15, dt);
     this.computeTorso(this.lean.x, this.twist.x, this.roll.x);
@@ -542,7 +693,7 @@ export class Actor {
     this.torso.matrixWorldNeedsUpdate = true;
 
     // ---- collar & head
-    _v1.set(0, 0.574 + this.breath * 0.004, -0.024).applyMatrix4(this.torsoMatrix);
+    _v1.set(0, 0.600 + this.breath * 0.004, -0.028).applyMatrix4(this.torsoMatrix);
     this.collar.matrix.compose(_v1, this.torsoQuat, ONE);
     this.collar.matrixWorldNeedsUpdate = true;
 
@@ -566,14 +717,36 @@ export class Actor {
     this.headMat.uniforms.uNeckMat.value.copy(this.neckMat);
     this.headMat.uniforms.uHeadMat.value.copy(this.headWorld);
 
+    // ---- volumes the arms must stay out of: chest, upper chest, neck, head
+    const sp = this._sph;
+    const put = (o, x, y, z, r, m) => { _v3.set(x, y, z).applyMatrix4(m); o.x = _v3.x; o.y = _v3.y; o.z = _v3.z; o.r = r; };
+    put(sp[0], 0, 0.30, 0.01, 0.175, this.torsoMatrix);
+    put(sp[1], 0, 0.46, 0.0, 0.125, this.torsoMatrix);
+    put(sp[2], 0, 0.62, -0.012, 0.062, this.torsoMatrix);
+    put(sp[3], 0, 0.09, 0.012, 0.105, this.headWorld);
+    put(sp[4], 0, 0.02, 0.06, 0.06, this.headWorld); // jaw & chin
+    put(sp[5], 0, 0.07, 0.085, 0.055, this.headWorld); // nose & mouth
+    this.bodySpheres = sp;
+
+    // ---- legs follow the hips; knees bend forward, feet stay put
+    const hipNow = _v3.setFromMatrixPosition(this.torsoMatrix);
+    for (const leg of this.legs) {
+      leg.H.copy(hipNow).addScaledVector(leg.left, leg.s * 0.088);
+      leg.H.y -= 0.03;
+      const pole = _v2.copy(leg.f).multiplyScalar(1).add(_v1.set(0, this.seated ? 0.6 : 0.15, 0)).normalize();
+      solveTwoBone(leg.H, leg.ankle, 0.455, 0.445, pole, leg.K, leg.A);
+      leg.tube.build(leg.H, leg.K, leg.A, leg.f, { rShoulder: 0.078, rElbow: 0.058, rWrist: 0.047, endBack: -0.02 });
+    }
+
     // ---- arms & hands
     for (const side of ['left', 'right']) {
       const h = this.hands[side];
       if (h) h.update(dt, time);
       else {
         const arm = this.arms[side];
-        const W = _v3.copy(this.restArm.wrist).applyMatrix4(this.torsoMatrix);
-        arm.solve(W);
+        const W = this._restW || (this._restW = new THREE.Vector3());
+        W.copy(this.restArm.wrist).applyMatrix4(this.torsoMatrix);
+        arm.solve(W, dt);
         arm.forearmFrame(_v2.set(0, 1, 0));
         arm.updateMeshes();
       }

@@ -1,16 +1,17 @@
 // Nim — boot, render passes, camera framing, input, adaptive quality.
 import * as THREE from 'three';
 import { G, OCC_N, setQuality, makeSkinMaterial, makeHeadMaterial, makeClothMaterial, makeShirtMaterial, makeMetalMaterial } from './materials.js';
-import { buildTable, MatchSet, TABLE_Y, TABLE_R, L_TABLE, L_MAIN_ONLY, L_NO_MIRROR, ROW_X0, ROW_DX, ROW_Z } from './world.js';
+import { buildTable, MatchSet, TABLE_Y, TABLE_R, L_TABLE, L_MAIN_ONLY, L_NO_MIRROR, L_NO_SHADOW, ROW_X0, ROW_DX, ROW_Z } from './world.js';
 import { initPoses, POSES } from './handModel.js';
 import { Actor } from './actors.js';
 import { Director } from './director.js';
 import { Post } from './post.js';
 import { Foley } from './audio.js';
 import { UI } from './ui.js';
-import { Scheduler, DEG, quatFromYZ, clamp, smoothstep, fnoise } from './util.js';
+import { Scheduler, Spring, DEG, quatFromYZ, clamp, smoothstep, fnoise } from './util.js';
 
 const params = new URLSearchParams(location.search);
+const LEAN_IN = params.get('lean') !== '0';
 if (params.has('clean')) document.body.classList.add('clean');
 const canvas = document.getElementById('c');
 const isTouch = matchMedia('(pointer: coarse)').matches;
@@ -35,8 +36,10 @@ const camera = new THREE.PerspectiveCamera(20, 1, 0.08, 20);
 camera.layers.enable(L_TABLE);
 camera.layers.enable(L_MAIN_ONLY);
 camera.layers.enable(L_NO_MIRROR);
+camera.layers.enable(L_NO_SHADOW);
 const mirrorCam = new THREE.PerspectiveCamera();
 mirrorCam.layers.set(0);
+mirrorCam.layers.enable(L_NO_SHADOW);
 const lightCam = new THREE.PerspectiveCamera(58, 1, 0.7, 3.4);
 lightCam.layers.set(0);
 lightCam.layers.enable(L_TABLE); // the stone shades the floor & pedestal
@@ -146,7 +149,7 @@ function resize() {
   renderer.setPixelRatio(1);
   renderer.setSize(W, H, false);
   mainRT.setSize(W, H);
-  const rs = isMobile ? 0.45 : 0.55;
+  const rs = isMobile ? 0.55 : 0.75;
   reflRT.setSize(Math.max(2, Math.round(W * rs)), Math.max(2, Math.round(H * rs)));
   post.setSize(W, H);
   frameCamera(cw, ch);
@@ -158,7 +161,8 @@ function build() {
   const t0 = performance.now();
   initPoses();
   makeTargets();
-  post = new Post(renderer);
+  post = new Post(renderer, { dofTaps: isMobile ? 32 : 48 });
+  post.dofEnabled = !params.has('nodof') && !params.has('cam');
   applyLights();
   table = buildTable(scene);
   matches = new MatchSet(scene);
@@ -176,14 +180,15 @@ function build() {
   player = new Actor(scene, {
     name: 'player',
     seated: true,
-    hip: new THREE.Vector3(-0.312, 0.44, 0.858),
+    castsBody: false,
+    hip: new THREE.Vector3(-0.282, 0.44, 0.828),
     yaw: Math.atan2(0.06, -1.0),
     lean: 0.62,
-    maxExtraLean: 0.22,
+    maxExtraLean: 0.32,
+    reachSlide: 0.06,
     twistGain: 0.26,
     armLen: [0.318, 0.29],
-    hands: ['left'],
-    restArm: { wrist: new THREE.Vector3(-0.10, 0.20, 0.27) },
+    hands: ['left', 'right'],
     breathRate: 0.23,
     lookWeight: 0.32,
   }, mats(0.040));
@@ -199,18 +204,36 @@ function build() {
     armLen: [0.31, 0.28],
     pole: [-0.15, -0.35, -0.9],
     maxExtraLean: 0.65,
+    // bent low over the board, his face hangs above the stone and shows in it (?lean=0 to compare)
+    posture: LEAN_IN ? 1 : 0,
+    crouch: { drop: 0.27, fwd: -0.15, lean: -0.04 },
+    mirrorBody: LEAN_IN,
+    headCell: LEAN_IN ? 0.0041 : 0.0052,
   }, mats(0.034));
   opponent.headMat.uniforms.uSkinTone.value = 0.28;
 
   // resting poses (the shot)
+  const pR = player.hands.right; // resting on his right thigh, below the stone and out of shot
+  {
+    const f = new THREE.Vector3(Math.sin(player.yaw), 0, Math.cos(player.yaw));
+    const left = new THREE.Vector3(0, 1, 0).cross(f);
+    const w = player.hip.clone().addScaledVector(left, -0.15).addScaledVector(f, 0.24);
+    w.y = player.hip.y + 0.118;
+    pR.setRest(w, quatFromYZ(f.clone().setY(-0.12), new THREE.Vector3(-left.x * 0.25, 1, -left.z * 0.25)), POSES.relaxed);
+    pR.lapRest = true;
+    pR.edgeQuat = quatFromYZ(f.clone().setY(-0.35), new THREE.Vector3(0, 1, 0));
+    pR.snapToRest();
+  }
   const pl = player.hands.left;
   pl.setRest(new THREE.Vector3(-0.235, 0.80, 0.245), quatFromYZ(new THREE.Vector3(0.5, -0.15, -0.85), new THREE.Vector3(-0.768, 0.452, -0.452)), POSES.fist);
   pl.snapToRest();
   const oR = opponent.hands.right; // screen-left, the one that plays
-  oR.setRest(new THREE.Vector3(-0.150, 0.808, -0.345), quatFromYZ(new THREE.Vector3(0.08, -0.55, 0.85), new THREE.Vector3(-0.1, 0.85, 0.5)), POSES.poised);
+  oR.setRest(new THREE.Vector3(-0.205, 0.785, -0.398), quatFromYZ(new THREE.Vector3(0.0, -0.34, 1.0), new THREE.Vector3(-0.08, 1.0, 0.34)), POSES.poised);
   oR.snapToRest();
   const oL = opponent.hands.left; // screen-right, splayed support hand
-  oL.setRest(new THREE.Vector3(0.252, 0.80, -0.36), quatFromYZ(new THREE.Vector3(-0.18, -0.28, 1.0), new THREE.Vector3(0.05, 1.0, 0.25)), POSES.spread);
+  // braced flat on the stone, fingers splayed toward the board: his weight rests here
+  oL.setRest(new THREE.Vector3(0.162, TABLE_Y + 0.012, -0.338), quatFromYZ(new THREE.Vector3(0.42, 0, 1.0), new THREE.Vector3(0, 1, 0)), POSES.brace);
+  oL.brace = true;
   oL.snapToRest();
 
   director = new Director({ sched, matches, player, opponent, ui, foley, camera });
@@ -334,6 +357,7 @@ function updateOccluders() {
     occ.push([m.pos.x - ax.x * 0.021, m.pos.y - ax.y * 0.021, m.pos.z - ax.z * 0.021, m.pos.x + ax.x * 0.021, m.pos.y + ax.y * 0.021, m.pos.z + ax.z * 0.021, 0.0019, 1.0]);
   }
   player.hands.left.occluders(occ);
+  player.hands.right.occluders(occ);
   opponent.hands.right.occluders(occ);
   opponent.hands.left.occluders(occ);
   const u = table.top.material.uniforms.uOcc.value;
@@ -345,15 +369,31 @@ function updateOccluders() {
   }
 }
 
+// focus pulls gently to whatever is being played on the table
+const APERTURE = Number(params.get('aperture')) || 0.0065;
+const focusDist = new Spring(1.65, 0.45);
+// eye light: follows the opponent's face when he bends to the board (only with the lean-in)
+const FACE_LIGHT = new THREE.Vector3(0.28, 1.95, 1.25);
+const _face = new THREE.Vector3();
+function updateFaceLight() {
+  if (!LEAN_IN) { G.uFaceColor.value.setScalar(0); return; }
+  _face.set(0, 0.07, 0.07).applyMatrix4(opponent.headWorld);
+  G.uFacePos.value.copy(FACE_LIGHT);
+  G.uFaceDir.value.subVectors(_face, FACE_LIGHT).normalize();
+  G.uFaceCone.value.set(Math.cos(4.6 * DEG), Math.cos(1.8 * DEG));
+  G.uFaceColor.value.setScalar(6.5);
+}
 let time = 0;
 function step(dt) {
   time += dt;
   G.uTime.value = time;
   sched.update(dt);
   director.updateLooks(dt);
+  focusDist.update(clamp(camera.position.distanceTo(director.focusPoint()), 1.35, 2.1), dt);
   player.update(dt, time);
   opponent.update(dt, time);
   matches.update(dt, time);
+  updateFaceLight();
 }
 
 let fade = 0;
@@ -374,11 +414,14 @@ function render() {
   G.uPass.value = 1;
   renderer.setRenderTarget(reflRT);
   renderer.render(scene, mirrorCam);
-  // 3. beauty
+  // 3. beauty (alpha carries camera distance; the void counts as far away)
   G.uPass.value = 0;
   table.top.material.uniforms.uReflTex.value = reflRT.texture;
+  renderer.setClearAlpha(60);
   renderer.setRenderTarget(mainRT);
   renderer.render(scene, camera);
+  renderer.setClearAlpha(1);
+  post.setLens(focusDist.x, APERTURE, camera.fov);
   // 4. film
   post.comp.uniforms.uFade.value = fade;
   post.comp.uniforms.uFlicker.value = fnoise(time * 9.0, 2) * 0.012;

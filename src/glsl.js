@@ -27,6 +27,10 @@ uniform vec3 uFillDir;
 uniform vec3 uFillColor;
 uniform vec3 uRimDir;
 uniform vec3 uRimColor;
+uniform vec3 uFacePos;     // narrow follow-spot on the opponent's face (an eye light)
+uniform vec3 uFaceDir;
+uniform vec2 uFaceCone;
+uniform vec3 uFaceColor;
 uniform vec3 uAmbTop;
 uniform vec3 uAmbBot;
 uniform float uEnvGain;
@@ -63,7 +67,8 @@ vec3 bumpNormal(vec3 pos, vec3 n, float h) {
   float det = dot(dpx, r1);
   float dhx = dFdx(h), dhy = dFdy(h);
   vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
-  return normalize(abs(det) * n - grad);
+  vec3 r = abs(det) * n - grad;
+  return dot(r, r) > 1e-24 ? normalize(r) : n;
 }
 
 // ---------------------------------------------------------------- BRDFs
@@ -143,6 +148,44 @@ float shadowPCSS(vec3 P, vec3 N, float soft) {
   return lit / float(SHADOW_TAPS);
 }
 
+// narrow, shadowless follow-spot from in front, aimed at the opponent's face
+vec3 faceLight(vec3 P, out vec3 L) {
+  vec3 d = uFacePos - P;
+  float d2 = dot(d, d);
+  L = d * inversesqrt(d2);
+  float spot = smoothstep(uFaceCone.x, uFaceCone.y, dot(-L, uFaceDir));
+  return uFaceColor * spot * spot / d2;
+}
+
+// ---------------------------------------------------------------- the stone as a mirror for the lamp
+// The polished table throws the lamp back up: a virtual lamp mirrored below the stone
+// lights chins, palms and the undersides of fingers, gated by whether the bounce point
+// on the stone is itself lit (one hard shadow tap) and by the stone's Fresnel.
+float shadowHard(vec3 P) {
+  vec4 sc = uShadowMatrix * vec4(P + vec3(0.0, 0.0015, 0.0), 1.0);
+  if (sc.w <= 0.0) return 1.0;
+  vec2 uv = sc.xy / sc.w * 0.5 + 0.5;
+  if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) return 1.0;
+  return step(sc.w - 0.003, linShadow(texture2D(uShadowMap, uv).r));
+}
+vec3 keyLight(vec3 P, out vec3 L, out float dist);
+vec3 tableBounce(vec3 P, out vec3 Lb) {
+  Lb = vec3(0.0, -1.0, 0.0);
+  if (P.y < uTableY + 0.001) return vec3(0.0);
+  vec3 Lm = vec3(uKeyPos.x, 2.0 * uTableY - uKeyPos.y, uKeyPos.z);
+  vec3 d = P - Lm;
+  vec3 Q = Lm + d * ((uTableY - Lm.y) / d.y);
+  float onTable = smoothstep(uTableR, uTableR - 0.03, length(Q.xz));
+  if (onTable <= 0.0) return vec3(0.0);
+  vec3 Lq; float dq;
+  vec3 Eq = keyLight(Q, Lq, dq);
+  float d2 = dot(d, d);
+  float cosI = abs(d.y) * inversesqrt(d2);
+  float F = 0.045 + 0.955 * pow5(1.0 - cosI);
+  Lb = -d * inversesqrt(d2);
+  return Eq * (dq * dq / d2) * F * 3.0 * onTable * shadowHard(Q);
+}
+
 // ---------------------------------------------------------------- key light
 vec3 keyLight(vec3 P, out vec3 L, out float dist) {
   vec3 d = uKeyPos - P;
@@ -216,6 +259,10 @@ vec3 shade(Surface s) {
   float pool = lightPool(s.P);
   col += directLobe(s, uFillDir, uFillColor * pool, 1.0, 0.25);
   col += directLobe(s, uRimDir, uRimColor * pool, 1.0, 0.15);
+  vec3 Lb; vec3 Eb = tableBounce(s.P, Lb);
+  col += directLobe(s, Lb, Eb, 1.0, 0.1);
+  vec3 Lf; vec3 Ef = faceLight(s.P, Lf);
+  if (Ef.x > 1e-5) col += directLobe(s, Lf, Ef, 1.0, 0.2);
   // ambient
   float NoV = max(dot(s.N, s.V), 1e-3);
   vec2 ab = envBRDF(NoV, s.rough);
@@ -226,9 +273,68 @@ vec3 shade(Surface s) {
   return col;
 }
 
+// ---------------------------------------------------------------- skin
+// Subsurface approximation in the spirit of pre-integrated skin: light wraps
+// further for longer wavelengths and on tighter curvature, the penumbra bleeds,
+// thin parts (fingers, ear rims) transmit, and a vellus-hair rim softens the
+// silhouette. Diffusion also blurs the micro-normal per channel.
+vec3 wrapDiffuse(vec3 NoL3, vec3 w) { return sat3((NoL3 + w) / (1.0 + w)) / (1.0 + w); }
+vec3 shadeSkin(vec3 P, vec3 N, vec3 Ng, vec3 V, vec3 alb, float rough, float thin, float curv, float ao, float oil) {
+  vec3 L; float dist;
+  vec3 E = keyLight(P, L, dist);
+  float sh = 0.0;
+  if (E.x > 1e-5 && dot(Ng, L) > -0.6) sh = shadowPCSS(P, Ng, 2.4);
+  // scattered light reaches into the shadow edge: red the furthest
+  vec3 shC = max(vec3(sh), pow(vec3(sh), vec3(0.45, 0.7, 0.9)) * vec3(1.0, 0.97, 0.95));
+  vec3 wrapC = vec3(0.62, 0.27, 0.15) * (0.5 + 1.1 * curv);
+  vec3 Nr = normalize(mix(N, Ng, 0.8)), Nm = normalize(mix(N, Ng, 0.45));
+  vec3 NoL3 = vec3(dot(Nr, L), dot(Nm, L), dot(N, L));
+  vec3 col = alb * wrapDiffuse(NoL3, wrapC) / PI * E * shC;
+  // translucency of thin parts
+  float back = pow(sat(dot(V, -L) * 0.5 + 0.5), 4.0) + 0.3 * sat(0.3 - dot(Ng, L));
+  col += alb * vec3(1.0, 0.5, 0.3) * thin * back * E * (0.15 + 0.85 * shC.r) * 0.32;
+  // two specular lobes: dull epidermis + thin oily film
+  vec3 H = normalize(L + V);
+  float NoV = max(dot(N, V), 1e-3);
+  float NoH = sat(dot(N, H)), VoH = sat(dot(V, H)), NoL = sat(dot(N, L));
+  float aL = uKeySize / (2.0 * dist);
+  float a1 = max(rough * rough, 0.02), a2 = max(a1 * 0.35, 0.008);
+  float b1 = sat(a1 + aL), b2 = sat(a2 + aL);
+  float F = 0.028 + 0.972 * pow5(1.0 - VoH);
+  float spec = 0.9 * D_GGX(NoH, b1) * V_SmithGGX(NoV, NoL, b1) * (a1 * a1) / (b1 * b1)
+             + oil * D_GGX(NoH, b2) * V_SmithGGX(NoV, NoL, b2) * (a2 * a2) / (b2 * b2);
+  col += vec3(spec * F * NoL) * E * sh;
+  // vellus hair / peach fuzz
+  col += alb * pow(1.0 - NoV, 3.0) * 0.16 * E * shC.g * sat(dot(Ng, L) + 0.35);
+  // pooled fills, wrapped as well
+  float pool = lightPool(P);
+  col += alb * wrapDiffuse(vec3(dot(Nr, uFillDir), dot(Nm, uFillDir), dot(N, uFillDir)), wrapC) / PI * uFillColor * pool;
+  col += alb * wrapDiffuse(vec3(dot(Nr, uRimDir), dot(Nm, uRimDir), dot(N, uRimDir)), wrapC) / PI * uRimColor * pool;
+  col += alb * vec3(1.0, 0.5, 0.3) * thin * pow(sat(dot(V, -uRimDir)), 3.0) * uRimColor * pool * 0.3;
+  vec3 Lb; vec3 Eb = tableBounce(P, Lb);
+  col += alb * wrapDiffuse(vec3(dot(Nr, Lb), dot(Nm, Lb), dot(N, Lb)), wrapC) / PI * Eb;
+  vec3 Lf; vec3 Ef = faceLight(P, Lf);
+  if (Ef.x > 1e-5) {
+    col += alb * wrapDiffuse(vec3(dot(Nr, Lf), dot(Nm, Lf), dot(N, Lf)), wrapC) / PI * Ef;
+    vec3 Hf = normalize(Lf + V);
+    float bf = sat(a2 + 0.02);
+    col += vec3(oil * D_GGX(sat(dot(N, Hf)), bf) * V_SmithGGX(NoV, sat(dot(N, Lf)), bf) * (0.028 + 0.972 * pow5(1.0 - sat(dot(V, Hf)))) * sat(dot(N, Lf))) * Ef;
+  }
+  col += ambientDiffuse(Nr) * alb * ao * (0.35 + 0.65 * pool);
+  vec2 ab = envBRDF(NoV, rough);
+  col += envRadiance(reflect(-V, N), rough) * (0.028 * ab.x + ab.y) * ao * 0.7;
+  return col;
+}
+// screen-space curvature (1/m), normalised to roughly [0,1] for finger-sized features
+float curvature(vec3 Ng, vec3 P) { return clamp(length(fwidth(Ng)) / (length(fwidth(P)) + 1e-6) * 0.0045, 0.0, 1.0); }
+
 // Fragment output convention shared by every material.
+// alpha: height above the stone in the mirror pass, camera distance in the beauty pass (for depth of field)
 vec4 finalColor(vec3 col, vec3 P) {
-  return vec4(col, uPass == 1 ? max(P.y - uTableY, 0.0) : 1.0);
+  // never let a degenerate pixel poison the blur passes
+  if (any(isnan(col)) || any(isinf(col))) col = vec3(0.0);
+  col = clamp(col, 0.0, 64.0);
+  return vec4(col, uPass == 1 ? max(P.y - uTableY, 0.0) : (uPass == 0 ? distance(P, cameraPosition) : 1.0));
 }
 `;
 

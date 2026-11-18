@@ -34,9 +34,48 @@ void main() {
   gl_FragColor = vec4(c, 1.0);
 }`;
 
+// Bokeh depth of field, gathered on a golden-angle spiral (after D. Gustafsson).
+// Thin-lens circle of confusion from the camera distance stored in alpha.
+const DOF = /* glsl */ `
+uniform sampler2D tScene;
+uniform vec2 uTexel;
+uniform float uFocus;
+uniform float uScale;
+uniform float uMaxR;
+varying vec2 vUv;
+float cocOf(float d) { return min(uScale * abs(1.0 / uFocus - 1.0 / max(d, 0.05)), uMaxR); }
+void main() {
+  vec4 c0 = texture2D(tScene, vUv);
+  c0.a = max(c0.a, 0.05);
+  float d0 = c0.a;
+  float s0 = cocOf(d0);
+  vec3 acc = c0.rgb;
+  float tot = 1.0;
+  float cover = s0;
+  float r = 0.75;
+  float ang = 0.0;
+  for (int i = 0; i < DOF_TAPS; i++) {
+    vec2 tc = vUv + vec2(cos(ang), sin(ang)) * uTexel * r;
+    vec4 c = texture2D(tScene, tc);
+    float s = cocOf(c.a);
+    // the background may not bleed over a sharper foreground
+    if (c.a > d0) s = min(s, s0 * 2.0);
+    float m = smoothstep(r - 0.5, r + 0.5, s);
+    acc += mix(acc / tot, c.rgb, m);
+    tot += 1.0;
+    // blurred foreground spreading over this pixel
+    if (c.a < d0) cover = max(cover, s * m);
+    ang += 2.39996323;
+    r += 0.75 / r;
+  }
+  gl_FragColor = vec4(acc / tot, cover);
+}`;
+
 const COMPOSITE = /* glsl */ `
 uniform sampler2D tScene;
 uniform sampler2D tBloom;
+uniform sampler2D tDof;
+uniform float uDofOn;
 uniform vec2 uRes;
 uniform float uTime;
 uniform float uExposure;
@@ -55,6 +94,10 @@ float filmic(float x) {
 }
 void main() {
   vec3 c = texture2D(tScene, vUv).rgb;
+  if (uDofOn > 0.5) {
+    vec4 dof = texture2D(tDof, vUv);
+    c = mix(c, dof.rgb, smoothstep(0.35, 1.3, dof.a));
+  }
   vec3 b = texture2D(tBloom, vUv).rgb;
   // panchromatic film weighting (slightly red-insensitive)
   vec3 W = vec3(0.26, 0.62, 0.12);
@@ -80,7 +123,7 @@ void main() {
 }`;
 
 export class Post {
-  constructor(renderer) {
+  constructor(renderer, { dofTaps = 48 } = {}) {
     this.renderer = renderer;
     this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this.scene = new THREE.Scene();
@@ -90,6 +133,16 @@ export class Post {
     const opts = { type: THREE.HalfFloatType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter };
     this.a = new THREE.WebGLRenderTarget(4, 4, opts);
     this.b = new THREE.WebGLRenderTarget(4, 4, opts);
+    this.dofRT = new THREE.WebGLRenderTarget(4, 4, opts);
+    this.dof = new THREE.ShaderMaterial({
+      vertexShader: VS,
+      fragmentShader: DOF,
+      defines: { DOF_TAPS: dofTaps },
+      uniforms: { tScene: { value: null }, uTexel: { value: new THREE.Vector2() }, uFocus: { value: 1.65 }, uScale: { value: 1 }, uMaxR: { value: 9 } },
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.dofEnabled = true;
     this.down = new THREE.ShaderMaterial({ vertexShader: VS, fragmentShader: DOWN, uniforms: { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } }, depthTest: false, depthWrite: false });
     this.blur = new THREE.ShaderMaterial({ vertexShader: VS, fragmentShader: BLUR, uniforms: { tSrc: { value: null }, uDir: { value: new THREE.Vector2() } }, depthTest: false, depthWrite: false });
     this.comp = new THREE.ShaderMaterial({
@@ -98,6 +151,8 @@ export class Post {
       uniforms: {
         tScene: { value: null },
         tBloom: { value: this.a.texture },
+        tDof: { value: this.dofRT.texture },
+        uDofOn: { value: 1 },
         uRes: { value: new THREE.Vector2() },
         uTime: { value: 0 },
         uExposure: { value: 1.0 },
@@ -114,6 +169,8 @@ export class Post {
     const bw = Math.max(2, Math.floor(w / 4)), bh = Math.max(2, Math.floor(h / 4));
     this.a.setSize(bw, bh);
     this.b.setSize(bw, bh);
+    this.dofRT.setSize(Math.max(2, Math.floor(w / 2)), Math.max(2, Math.floor(h / 2)));
+    this.dof.uniforms.uTexel.value.set(1 / this.dofRT.width, 1 / this.dofRT.height);
     this.comp.uniforms.uRes.value.set(w, h);
     this.fullW = w;
     this.fullH = h;
@@ -123,8 +180,19 @@ export class Post {
     this.renderer.setRenderTarget(target);
     this.renderer.render(this.scene, this.cam);
   }
+  // focus: metres; aperture: lens opening (m); vfov: degrees
+  setLens(focus, aperture, vfovDeg) {
+    const fpx = this.dofRT.height / (2 * Math.tan((vfovDeg * Math.PI) / 360));
+    this.dof.uniforms.uFocus.value = focus;
+    this.dof.uniforms.uScale.value = aperture * fpx;
+  }
   render(srcTex, time) {
     const r = this.renderer;
+    if (this.dofEnabled) {
+      this.dof.uniforms.tScene.value = srcTex;
+      this.pass(this.dof, this.dofRT);
+    }
+    this.comp.uniforms.uDofOn.value = this.dofEnabled ? 1 : 0;
     this.down.uniforms.tSrc.value = srcTex;
     this.down.uniforms.uTexel.value.set(1.5 / this.fullW, 1.5 / this.fullH);
     this.pass(this.down, this.a);

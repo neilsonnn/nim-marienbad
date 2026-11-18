@@ -9,34 +9,45 @@ export const TABLE_R = 0.37;
 // Layers: 0 = casts shadows & appears in the mirror, 1 = table top, 2 = main view only
 export const L_MAIN_ONLY = 2;
 export const L_NO_MIRROR = 3; // main + shadow, not reflected (bodies: their reflections are invisible)
+export const L_NO_SHADOW = 4; // main + mirror, casts no shadow
 export const L_TABLE = 1;
 
 export function buildTable(scene) {
-  const top = new THREE.Mesh(new THREE.CircleGeometry(TABLE_R - 0.0012, 160).rotateX(-Math.PI / 2), makeTableMaterial());
+  const R = TABLE_R;
+  // the stone slab: flat top, polished bullnose edge, a short vertical lip
+  const stone = [[0.0004, 0], [R - 0.0085, 0]];
+  for (let i = 1; i <= 12; i++) {
+    const a = (i / 12) * Math.PI * 0.5;
+    stone.push([R - 0.0085 + Math.sin(a) * 0.008, -0.008 + Math.cos(a) * 0.008]);
+  }
+  stone.push([R - 0.0005, -0.0118], [R - 0.0035, -0.0126]);
+  // (lathe winding: profile runs from the underside up and in, so the top faces up)
+  const top = new THREE.Mesh(new THREE.LatheGeometry(stone.reverse().map(([r, y]) => new THREE.Vector2(r, y)), 224), makeTableMaterial());
   top.position.y = TABLE_Y;
   top.layers.set(L_TABLE);
   top.name = 'tabletop';
   scene.add(top);
 
-  // chrome band: rounded lip flush with the stone, straight skirt below
-  const R = TABLE_R;
-  const prof = [[R - 0.0030, -0.0004], [R - 0.0018, 0.0007]];
-  // bullnose: a half-round of 6 mm that catches the room
-  for (let i = 0; i <= 14; i++) {
-    const a = Math.PI * 0.5 - (i / 14) * Math.PI * 0.95;
-    prof.push([R + 0.0015 + Math.cos(a) * 0.0062, -0.0055 + Math.sin(a) * 0.0062]);
-  }
-  prof.push([R + 0.0068, -0.0150], [R + 0.0064, -0.0262], [R + 0.0052, -0.0286], [R + 0.0030, -0.0296], [R - 0.0200, -0.0298]);
-  for (const p of prof) p[1] = Math.min(p[1], 0.0007);
-  const profV = prof.map(([r, y]) => new THREE.Vector2(r, y));
-  const rim = new THREE.Mesh(new THREE.LatheGeometry(profV, 160), makeMetalMaterial({ albedo: 0.82, rough: 0.085, aniso: 1 }));
+  // nickel band under the stone: a shadow gap, two polished beads and a brushed face
+  const band = [[R - 0.0035, -0.0128], [R - 0.0008, -0.0132]];
+  const bead = (cy, r, n = 9) => {
+    for (let i = 0; i <= n; i++) {
+      const a = Math.PI * 0.5 - (i / n) * Math.PI;
+      band.push([R + 0.0002 + Math.cos(a) * r, cy + Math.sin(a) * r]);
+    }
+  };
+  bead(-0.0157, 0.0023);
+  band.push([R - 0.0004, -0.0186], [R - 0.0004, -0.0312]);
+  bead(-0.0338, 0.0023);
+  band.push([R - 0.0022, -0.0366], [R - 0.0200, -0.0369]);
+  const rim = new THREE.Mesh(new THREE.LatheGeometry(band.map(([r, y]) => new THREE.Vector2(r, y)), 200), makeMetalMaterial({ albedo: 0.8, rough: 0.07, aniso: 1 }));
   rim.position.y = TABLE_Y;
   rim.layers.set(L_MAIN_ONLY);
   scene.add(rim);
 
   // underside, pedestal, foot, floor
   const under = new THREE.Mesh(new THREE.CircleGeometry(R, 64).rotateX(Math.PI / 2), makeMetalMaterial({ albedo: 0.05, rough: 0.6 }));
-  under.position.y = TABLE_Y - 0.0295;
+  under.position.y = TABLE_Y - 0.0368;
   under.layers.set(L_MAIN_ONLY);
   scene.add(under);
   const colGeo = new THREE.LatheGeometry([

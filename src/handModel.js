@@ -253,6 +253,8 @@ export const POSES = {
   spread: pose([[4, 12, 10, 9], [3, 12, 12, 2], [5, 14, 12, 6], [8, 16, 12, 12]], [-10, 6, -6, 6, 12]),
   // fingertips down near the matches (the shot: far left hand)
   touch: pose([[34, 44, 22, 2], [40, 52, 28, 0], [52, 64, 34, -1], [62, 70, 40, -2]], [18, 6, 16, 16, 22]),
+  // weight-bearing: palm pressed flat, fingers splayed and long
+  brace: pose([[3, 4, 2, 12], [2, 4, 2, 3], [3, 5, 3, 7], [5, 6, 4, 15]], [-6, 8, -4, 4, 6]),
   // fingertips lightly on the stone, fingers long (the shot: far left hand)
   poised: pose([[14, 22, 12, 2], [16, 26, 14, 0], [22, 30, 16, -1], [28, 34, 18, -2]], [10, 0, 0, 10, 12]),
   // ready to pinch: index & thumb open, others tucked
@@ -499,6 +501,7 @@ export function initPoses() {
   // flat / spread: thumb out to the side, pad down
   POSES.flat = solveThumb(POSES.flat, restObjective(I[0], new THREE.Vector3(-0.05, 0.005, -0.012)));
   POSES.spread = solveThumb(POSES.spread, restObjective(I[0], new THREE.Vector3(-0.058, -0.004, -0.014)));
+  POSES.brace = solveThumb(POSES.brace, restObjective(I[0], new THREE.Vector3(-0.062, -0.010, -0.016)));
   // pinch family
   const pinch = solvePinch(POSES.pinch, 0.0074);
   POSES.pinch = pinch.pose;
