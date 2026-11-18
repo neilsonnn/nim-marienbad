@@ -2,7 +2,7 @@
 // Local frame of the RIGHT hand: +Y toward the fingers, +Z dorsal (back of hand),
 // thumb on -X. The left hand is the exact mirror (x -> -x).
 import * as THREE from 'three';
-import { surfaceNets, relaxOnSurface, sdRoundCone, sdEllipsoid, sdRoundBox, smin, segDist2 } from './sdf.js';
+import { surfaceNets, relaxOnSurface, sdRoundCone, sdEllipsoid, sdRoundBox, smin, smax, segDist2 } from './sdf.js';
 import { DEG, smoothstep, clamp } from './util.js';
 
 const v = (x, y, z) => new THREE.Vector3(x, y, z);
@@ -46,7 +46,8 @@ function addBone(name, parent, pos, quat, segs, sigma) {
   return BONES.length - 1;
 }
 const ID = new THREE.Quaternion();
-export const B_FOREARM = addBone('forearm', -1, v(0, 0, 0), ID.clone(), [[v(0, -0.11, 0), v(0, -0.006, 0)]], 0.009);
+// the forearm's influence fades over a couple of centimetres so a bent wrist rounds off
+export const B_FOREARM = addBone('forearm', -1, v(0, 0, 0), ID.clone(), [[v(0, -0.11, 0), v(0, -0.008, 0)]], 0.0125);
 export const B_PALM = addBone('palm', 0, v(0, 0, 0), ID.clone(), [
   [v(0, -0.002, -0.002), v(0, 0.062, -0.003)],
   [v(-0.019, 0.004, -0.008), v(0.020, 0.008, -0.008)],
@@ -75,10 +76,15 @@ const fingerBounds = FINGERS.map((f) => ({ a: f.joints[0], b: f.joints[3], r: f.
 const thumbBound = { a: THUMB.joints[0], b: THUMB.joints[3], r: THUMB.rad[0] + 0.02 };
 
 export function handSDF(x, y, z) {
-  // forearm stub (elliptic cylinder, flattened) – hides inside the cuff
-  const ex = x / 0.0265, ez = (z + 0.001) / 0.0185;
-  let fore = (Math.sqrt(ex * ex + ez * ez) - 1) * 0.0185;
-  fore = Math.max(fore, -(y + 0.115), y - 0.006);
+  // forearm (an elliptic section, mostly hidden in the cuff). It tapers toward the
+  // palm's thickness and ends in a soft cap well inside it, so the wrist is one
+  // smooth surface: a hard-capped stub left a jagged crease right across the wrist.
+  const tw = smoothstep(-0.035, 0.014, y);
+  const ea = 0.0265 - 0.0010 * tw, eb = 0.0185 - 0.0042 * tw, ezc = -0.001 - 0.0025 * tw;
+  const ex = x / ea, ez = (z - ezc) / eb;
+  let fore = (Math.sqrt(ex * ex + ez * ez) - 1) * Math.min(ea, eb);
+  fore = smax(fore, y - 0.016, 0.012);
+  fore = Math.max(fore, -(y + 0.115));
   let d = fore;
 
   // palm slab + metacarpals + thenar / hypothenar eminences

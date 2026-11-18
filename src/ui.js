@@ -31,6 +31,11 @@ export class UI {
     this.el.loading.classList.add('gone');
     this.el.title.classList.add('show');
   }
+  // skip the title card (autoplay and debug runs start by themselves)
+  dismissTitle() {
+    this.el.title.classList.remove('show');
+    this.el.title.classList.add('gone');
+  }
   waitForStart() {
     return new Promise((res) => {
       const go = (e) => {

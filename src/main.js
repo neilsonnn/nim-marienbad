@@ -1,7 +1,7 @@
 // Nim — boot, render passes, camera framing, input, adaptive quality.
 import * as THREE from 'three';
 import { G, OCC_N, setQuality, makeSkinMaterial, makeHeadMaterial, makeClothMaterial, makeShirtMaterial, makeMetalMaterial } from './materials.js';
-import { buildTable, MatchSet, TABLE_Y, TABLE_R, L_TABLE, L_MAIN_ONLY, L_NO_MIRROR, L_NO_SHADOW, ROW_X0, ROW_DX, ROW_Z } from './world.js';
+import { buildTable, MatchSet, TABLE_Y, TABLE_R, L_TABLE, L_MAIN_ONLY, L_NO_MIRROR, L_NO_SHADOW, L_MIRROR_ONLY, ROW_X0, ROW_DX, ROW_Z } from './world.js';
 import { initPoses, POSES } from './handModel.js';
 import { Actor } from './actors.js';
 import { Director } from './director.js';
@@ -11,7 +11,8 @@ import { UI } from './ui.js';
 import { Scheduler, Spring, DEG, quatFromYZ, clamp, smoothstep, fnoise } from './util.js';
 
 const params = new URLSearchParams(location.search);
-const LEAN_IN = params.get('lean') !== '0';
+// ?lean=1 bends the opponent low over the board (his face then shows in the stone)
+const LEAN_IN = params.get('lean') === '1';
 if (params.has('clean')) document.body.classList.add('clean');
 const canvas = document.getElementById('c');
 const isTouch = matchMedia('(pointer: coarse)').matches;
@@ -40,7 +41,9 @@ camera.layers.enable(L_NO_SHADOW);
 const mirrorCam = new THREE.PerspectiveCamera();
 mirrorCam.layers.set(0);
 mirrorCam.layers.enable(L_NO_SHADOW);
-const lightCam = new THREE.PerspectiveCamera(58, 1, 0.7, 3.4);
+mirrorCam.layers.enable(L_MIRROR_ONLY);
+// near plane close to the lamp so nothing between it and the bodies is ever clipped
+const lightCam = new THREE.PerspectiveCamera(58, 1, 0.05, 3.4);
 lightCam.layers.set(0);
 lightCam.layers.enable(L_TABLE); // the stone shades the floor & pedestal
 lightCam.layers.enable(L_NO_MIRROR);
@@ -100,6 +103,7 @@ function frameCamera(w, h) {
   camera.lookAt(tgt);
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld();
+  if (orbit.on) applyOrbit();
 }
 // size & place the canvas: full screen, or a letterboxed frame on tall phones
 function layoutCanvas() {
@@ -181,13 +185,16 @@ function build() {
     name: 'player',
     seated: true,
     castsBody: false,
-    hip: new THREE.Vector3(-0.282, 0.44, 0.828),
+    hip: new THREE.Vector3(-0.282, 0.49, 0.826),
     yaw: Math.atan2(0.06, -1.0),
-    lean: 0.62,
-    maxExtraLean: 0.32,
+    lean: 0.6,
+    maxExtraLean: 0.36,
     reachSlide: 0.06,
     twistGain: 0.26,
     armLen: [0.318, 0.29],
+    // elbows carried out to the side, a little down and back, whatever the lean
+    pole: [0.88, -0.28, -0.38],
+    poleFrame: 'yaw',
     hands: ['left', 'right'],
     breathRate: 0.23,
     lookWeight: 0.32,
@@ -202,9 +209,11 @@ function build() {
     breathRate: 0.19,
     lookWeight: 0.75,
     armLen: [0.31, 0.28],
-    pole: [-0.15, -0.35, -0.9],
+    // elbows out and back behind the arms (never folding in toward his belly)
+    pole: [0.5, -0.3, -0.8],
+    poleFrame: 'yaw',
     maxExtraLean: 0.65,
-    // bent low over the board, his face hangs above the stone and shows in it (?lean=0 to compare)
+    // ?lean=1: bent low over the board, his face hangs above the stone and shows in it
     posture: LEAN_IN ? 1 : 0,
     crouch: { drop: 0.27, fwd: -0.15, lean: -0.04 },
     mirrorBody: LEAN_IN,
@@ -238,6 +247,8 @@ function build() {
 
   director = new Director({ sched, matches, player, opponent, ui, foley, camera });
   director.autoplay = params.has('autoplay');
+  director.debugLoop = params.get('debug') === 'loop';
+  director.debugFirst = params.get('first'); // ?debug=loop&first=opponent
   ui.onConfirm = () => director.confirm();
   ui.onClear = () => director.clearSelection();
   ui.setScore(director.score);
@@ -265,7 +276,8 @@ async function buildGallery() {
     const F = view === 'side' ? new THREE.Vector3(1, 0, 0) : view === 'palm' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, -1);
     const D = view === 'side' ? new THREE.Vector3(0, 1, 0) : view === 'palm' ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
     r.group.quaternion.copy(quatFromYZ(F, D));
-    r.applyPose(POSES[n], new THREE.Quaternion());
+    // &wrist=deg bends the wrist (positive = extension, back of the hand toward the forearm)
+    r.applyPose(POSES[n], new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), (Number(params.get('wrist')) || 0) * DEG));
     r.group.updateMatrixWorld(true);
     scene.add(r.group);
   });
@@ -301,8 +313,71 @@ function pickMatch(x, y) {
   }
   return bd <= pickRadius ? best : null;
 }
-let down = null;
+// Taps and drags paint the selection: the first match touched decides whether the
+// stroke selects or deselects, and the stroke stays in that match's row.
+// Right-drag orbits the camera (debug), the wheel dollies, C puts the shot back.
+let stroke = null;
+function paintAt(x, y, type) {
+  if (!stroke || !director || director.mode !== 'select') return;
+  const m = pickMatch(x, y);
+  if (!m || stroke.touched.has(m)) return;
+  if (stroke.mode === null) { stroke.mode = m.select ? 'off' : 'on'; stroke.row = m.row; }
+  if (m.row !== stroke.row) return;
+  stroke.touched.add(m);
+  director.setSelected(m, stroke.mode === 'on');
+  if (type !== 'mouse') director.setHover(m);
+}
+const orbit = { on: false, drag: null, yaw: 0, pitch: 0, dist: 1, target: new THREE.Vector3(0, TABLE_Y, -0.03) };
+function orbitBegin() {
+  if (orbit.on) return;
+  const d = camera.position.clone().sub(orbit.target);
+  orbit.dist = d.length();
+  orbit.yaw = Math.atan2(d.x, d.z);
+  orbit.pitch = Math.asin(clamp(d.y / orbit.dist, -1, 1));
+  orbit.on = true;
+}
+function applyOrbit() {
+  const cp = Math.cos(orbit.pitch);
+  camera.position.set(orbit.target.x + orbit.dist * cp * Math.sin(orbit.yaw), orbit.target.y + orbit.dist * Math.sin(orbit.pitch), orbit.target.z + orbit.dist * cp * Math.cos(orbit.yaw));
+  camera.lookAt(orbit.target);
+  camera.updateMatrixWorld();
+}
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button === 2) {
+    orbitBegin();
+    orbit.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, pan: e.shiftKey };
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+    return;
+  }
+  if (e.button !== 0) return;
+  stroke = { id: e.pointerId, mode: null, row: -1, last: { x: e.offsetX, y: e.offsetY }, touched: new Set() };
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+  paintAt(e.offsetX, e.offsetY, e.pointerType);
+});
 canvas.addEventListener('pointermove', (e) => {
+  if (orbit.drag && e.pointerId === orbit.drag.id) {
+    const dx = e.clientX - orbit.drag.x, dy = e.clientY - orbit.drag.y;
+    orbit.drag.x = e.clientX; orbit.drag.y = e.clientY;
+    if (orbit.drag.pan) {
+      const r = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+      const u = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+      const k = orbit.dist * 0.0012;
+      orbit.target.addScaledVector(r, -dx * k).addScaledVector(u, dy * k);
+    } else {
+      orbit.yaw -= dx * 0.006;
+      orbit.pitch = clamp(orbit.pitch + dy * 0.005, -0.2, 1.45);
+    }
+    applyOrbit();
+    return;
+  }
+  if (stroke && e.pointerId === stroke.id) {
+    // sample along the drag so a quick swipe doesn't skip matches
+    const x0 = stroke.last.x, y0 = stroke.last.y, x1 = e.offsetX, y1 = e.offsetY;
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / Math.max(3, pickRadius * 0.4)));
+    for (let i = 1; i <= n; i++) paintAt(x0 + (x1 - x0) * (i / n), y0 + (y1 - y0) * (i / n), e.pointerType);
+    stroke.last.x = x1; stroke.last.y = y1;
+  }
   if (!director || director.mode !== 'select') { canvas.classList.remove('pointing'); return; }
   if (e.pointerType === 'mouse') {
     const m = pickMatch(e.offsetX, e.offsetY);
@@ -310,23 +385,24 @@ canvas.addEventListener('pointermove', (e) => {
     canvas.classList.toggle('pointing', !!m);
   }
 });
-canvas.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
-canvas.addEventListener('pointerup', (e) => {
-  if (!down || !director) return;
-  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
-  down = null;
-  if (moved > 14 || director.mode !== 'select') return;
-  const m = pickMatch(e.offsetX, e.offsetY);
-  if (m) {
-    director.toggle(m);
-    if (e.pointerType !== 'mouse') director.setHover(m);
-  }
-});
+const endPointer = (e) => {
+  if (orbit.drag && e.pointerId === orbit.drag.id) orbit.drag = null;
+  if (stroke && e.pointerId === stroke.id) stroke = null;
+};
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  orbitBegin();
+  orbit.dist = clamp(orbit.dist * Math.exp(e.deltaY * 0.0012), 0.25, 6);
+  applyOrbit();
+}, { passive: false });
 canvas.addEventListener('dblclick', () => director && director.confirm());
 window.addEventListener('keydown', (e) => {
   if (!director) return;
   if (e.key === 'Enter') director.confirm();
   if (e.key === 'Escape') director.clearSelection();
+  if (e.key === 'c' || e.key === 'C') { orbit.on = false; resize(); }
 });
 window.addEventListener('resize', () => post && resize());
 window.addEventListener('orientationchange', () => setTimeout(() => post && resize(), 200));

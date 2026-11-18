@@ -5,7 +5,8 @@ import { clamp, smoothstep, mulberry32, noise1 } from './util.js';
 
 // ------------------------------------------------------------------ torso (suit jacket)
 // local: origin at the hip pivot, +Y up the spine, +Z forward (chest), +X body's left
-export const SHOULDER_L = new THREE.Vector3(0.186, 0.466, -0.014);
+// the shoulder joint sits a few centimetres under the (padded) top of the shoulder
+export const SHOULDER_L = new THREE.Vector3(0.184, 0.486, -0.014);
 export const NECK_PIVOT = new THREE.Vector3(0, 0.655, -0.02);
 
 export function torsoSDF(x, y, z) {
@@ -91,43 +92,17 @@ function hairlineY(x, z) {
 function cranium(x, y, z) {
   return sdEllipsoid(x, y, z, 0, 0.106, -0.012, 0.0725, 0.088, 0.095);
 }
-// A gaunt, stern face: deep-set lidded eyes under a strong brow, high cheekbones
-// over hollow cheeks, a long bridged nose, thin lips, a hard jaw.
-export const EYE_L = [0.0315, 0.096, 0.073], EYE_R = 0.0118;
+// Rough, abstract faces: a skull, a soft face mass, a brow over shallow hollows,
+// a nose and a jaw. No eyes, lips or other features: read as heads, not portraits.
 function skinSDF(x, y, z) {
-  const ax = Math.abs(x); // the face is symmetric: model one side
+  const ax = Math.abs(x);
   let d = cranium(x, y, z);
-  // midface and forehead mass
-  d = smin(d, sdEllipsoid(x, y, z, 0, 0.074, 0.030, 0.056, 0.064, 0.064), 0.03);
-  // mandible: two rami meeting at the chin
-  d = smin(d, sdCapsule(ax, y, z, 0.046, 0.040, -0.004, 0.040, 0.012, 0.030, 0.0135), 0.024);
-  d = smin(d, sdCapsule(ax, y, z, 0.040, 0.012, 0.030, 0.013, -0.002, 0.074, 0.0125), 0.022);
-  d = smin(d, sdEllipsoid(x, y, z, 0, 0.001, 0.080, 0.019, 0.016, 0.014), 0.014);
-  // brow ridge and cheekbones
-  d = smin(d, sdCapsule(ax, y, z, 0.006, 0.115, 0.082, 0.040, 0.113, 0.071, 0.0085), 0.012);
-  d = smin(d, sdEllipsoid(ax, y, z, 0.049, 0.081, 0.058, 0.015, 0.011, 0.018), 0.014);
-  // gaunt: temples and cheeks hollow under the bone
-  d = smax(d, -sdEllipsoid(ax, y, z, 0.067, 0.112, 0.048, 0.010, 0.020, 0.016), 0.012);
-  d = smax(d, -sdEllipsoid(ax, y, z, 0.055, 0.050, 0.055, 0.012, 0.016, 0.014), 0.014);
-  // eye sockets (shallow) with eyeballs and heavy upper lids
-  d = smax(d, -sdEllipsoid(ax, y, z, EYE_L[0], EYE_L[1] + 0.001, 0.088, 0.016, 0.011, 0.012), 0.006);
-  d = Math.min(d, sdSphere(ax, y, z, EYE_L[0], EYE_L[1], EYE_L[2], EYE_R));
-  const lid = smax(sdSphere(ax, y, z, EYE_L[0], EYE_L[1], EYE_L[2] - 0.0005, EYE_R + 0.0014), (EYE_L[1] - 0.0012) - y, 0.0015);
-  d = smin(d, lid, 0.002);
-  const lower = smax(sdSphere(ax, y, z, EYE_L[0], EYE_L[1], EYE_L[2] - 0.001, EYE_R + 0.0009), y - (EYE_L[1] - 0.0075), 0.0015);
-  d = smin(d, lower, 0.002);
-  // nose: bridge, tip, wings
-  d = smin(d, sdRoundCone(x, y, z, 0, 0.104, 0.088, 0, 0.062, 0.108, 0.0055, 0.0078), 0.007);
-  d = smin(d, sdSphere(x, y, z, 0, 0.058, 0.106, 0.0072), 0.004);
-  d = smin(d, sdEllipsoid(ax, y, z, 0.0115, 0.056, 0.096, 0.0072, 0.0058, 0.0075), 0.004);
-  d = smax(d, -sdSphere(ax, y, z, 0.0065, 0.051, 0.099, 0.0028), 0.002); // nostrils
-  // thin lips with a parting line
-  d = smin(d, sdEllipsoid(x, y, z, 0, 0.0355, 0.091, 0.022, 0.0055, 0.0085), 0.006);
-  d = smin(d, sdEllipsoid(x, y, z, 0, 0.0265, 0.089, 0.020, 0.0055, 0.0082), 0.006);
-  d = smax(d, -sdEllipsoid(x, y, z, 0, 0.031, 0.098, 0.024, 0.0011, 0.010), 0.0015);
-  // neck + Adam's apple
-  d = smin(d, sdRoundCone(x, y, z, 0, -0.115, -0.022, 0, 0.045, -0.012, 0.0475, 0.0455), 0.03);
-  d = smin(d, sdSphere(x, y, z, 0, -0.012, 0.034, 0.011), 0.012);
+  d = smin(d, sdEllipsoid(x, y, z, 0, 0.072, 0.032, 0.058, 0.07, 0.062), 0.03);     // face mass
+  d = smin(d, sdEllipsoid(x, y, z, 0, 0.024, 0.044, 0.049, 0.034, 0.046), 0.03);    // jaw & chin
+  d = smin(d, sdCapsule(ax, y, z, 0.0, 0.111, 0.077, 0.034, 0.109, 0.066, 0.0105), 0.022); // brow
+  d = smax(d, -sdEllipsoid(ax, y, z, 0.031, 0.094, 0.093, 0.017, 0.011, 0.014), 0.012);   // soft hollows
+  d = smin(d, sdRoundCone(x, y, z, 0, 0.100, 0.088, 0, 0.065, 0.103, 0.0072, 0.0098), 0.012); // nose
+  d = smin(d, sdRoundCone(x, y, z, 0, -0.115, -0.022, 0, 0.045, -0.012, 0.0475, 0.0455), 0.03);   // neck
   return d;
 }
 function hairThickness(x, y, z) {
@@ -303,8 +278,9 @@ export function cuffGeometry() {
     const x = pos.getX(i), z = pos.getZ(i);
     const a = Math.atan2(z, x);
     const seam = Math.exp(-(a * a) / 0.02) * 0.0016;
-    pos.setX(i, x * (1 + seam / 0.036));
-    pos.setZ(i, z * 0.86);
+    // fitted close to the wrist (a few millimetres of play), so its inside stays hidden
+    pos.setX(i, x * (1 + seam / 0.036) * 0.95);
+    pos.setZ(i, z * 0.74);
   }
   g.computeVertexNormals();
   return g;

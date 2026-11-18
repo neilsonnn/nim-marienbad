@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { POSES, lerpPose } from './handModel.js';
 import { TABLE_Y, TABLE_R, ROWS, ROW_Z, ROW_X0, ROW_DX, Pile, tableQuat, MATCH_R } from './world.js';
 import { chooseMove } from './nim.js';
+import { DIAG } from './actors.js';
 import { clamp, lerp, smoothstep, DEG, rand, rng, mulberry32, easeOutCubic } from './util.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -66,7 +67,9 @@ export class Director {
   reachPitch(hand, target) {
     const S = hand.arm.S;
     const d = Math.hypot(target.x - S.x, target.z - S.z);
-    return lerp(60, 34, smoothstep(0.2, 0.8, d)) * DEG;
+    // the seated player's shoulders are low over the stone: a flatter hand spares his wrist
+    const near = hand.actor === this.player ? 38 : 60;
+    return lerp(near, 32, smoothstep(0.2, 0.8, d)) * DEG;
   }
   approachDir(hand, target) {
     return new THREE.Vector3(target.x - hand.arm.S.x, 0, target.z - hand.arm.S.z).normalize();
@@ -94,6 +97,8 @@ export class Director {
     for (let i = 0; i < ordered.length; i++) {
       const m = ordered[i];
       const first = hand.held.length === 0;
+      // a hand resting in the lap comes up past the table edge in one fluid motion
+      const via = i === 0 ? this.liftPath(hand) : null;
       const at = m.pos.clone();
       at.y = m.pos.y + 0.0024;
       const q = hand.graspQuat(m.axis(), this.approachDir(hand, at), this.reachPitch(hand, at));
@@ -101,7 +106,7 @@ export class Director {
       hover.y += first ? 0.045 : 0.02;
       const open = first ? POSES.reach : POSES.holdOpen;
       const close = hand.held.length >= 1 ? POSES.holdWide : POSES.hold;
-      await hand.moveTo({ tcp: hover, quat: q, pose: open, poseWin: [0.05, 0.65], arc: first ? undefined : 0.012, speed: quick ? 0.62 : first ? 1.0 : 0.8 });
+      await hand.moveTo({ tcp: hover, quat: q, pose: open, poseWin: via ? [0.4, 0.9] : [0.05, 0.65], arc: first ? undefined : 0.012, speed: quick ? 0.62 : first ? 1.0 : 0.8, via });
       await hand.moveTo({ tcp: at, quat: q, pose: open, dur: quick ? 0.12 : first ? 0.2 : 0.15, arc: 0, poseWin: [0, 1] });
       await hand.moveTo({ tcp: at, quat: q, pose: close, dur: quick ? 0.1 : 0.13, arc: 0, poseWin: [0, 1] });
       if (fromPile) fromPile.remove(m);
@@ -181,16 +186,16 @@ export class Director {
   }
 
   // A hand resting below the stone (on the thigh) must clear the table edge first.
-  // The hand comes up beside the body, out to its own side, so the arm never folds
-  // across the shoulder on its way from the thigh to the stone.
+  // It comes up in front of its own shoulder, a little to that side, and passes just
+  // over the edge: the elbow stays back and low instead of winging up beside the body.
   edgePoint(hand) {
     const a = hand.actor, S = hand.arm.S;
     const f = new THREE.Vector3(Math.sin(a.yaw), 0, Math.cos(a.yaw));
     const side = new THREE.Vector3(0, 1, 0).cross(f).multiplyScalar(hand.arm.s); // toward that arm's side
-    const p = S.clone().addScaledVector(side, 0.17).addScaledVector(f, 0.13);
-    p.y = TABLE_Y + 0.09;
+    const p = S.clone().addScaledVector(side, 0.10).addScaledVector(f, 0.30);
+    p.y = TABLE_Y + 0.075;
     const r = Math.hypot(p.x, p.z);
-    const rMin = TABLE_R + 0.06;
+    const rMin = TABLE_R + 0.045;
     if (r < rMin) { p.x *= rMin / r; p.z *= rMin / r; }
     return p;
   }
@@ -203,16 +208,15 @@ export class Director {
     p.y += 0.045;
     return p;
   }
-  async rise(hand) {
-    if (!hand.lapRest || hand.wrist.y > TABLE_Y + 0.05) return;
-    await hand.moveTo({ wrist: this.sidePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, arc: 0, poseWin: [0.0, 1], speed: 0.85, plant: 0 });
-    await hand.moveTo({ wrist: this.edgePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, arc: 0, poseWin: [0.2, 1], speed: 1.0 });
+  // via points for a hand leaving the lap (null when it's already up at the table)
+  liftPath(hand) {
+    if (!hand.lapRest || hand.wrist.y > TABLE_Y + 0.05) return null;
+    return [this.sidePoint(hand), this.edgePoint(hand)];
   }
   async goRest(hand, speed = 1) {
     if (hand.lapRest) {
-      await hand.moveTo({ wrist: this.edgePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, poseWin: [0.2, 1], speed: 0.9 * speed });
-      await hand.moveTo({ wrist: this.sidePoint(hand), quat: hand.edgeQuat, pose: POSES.relaxed, arc: 0, poseWin: [0.2, 1], speed: 1.0 * speed });
-      await hand.moveTo({ wrist: hand.restWrist, quat: hand.restQuat, pose: hand.restPose, plant: 1, arc: 0, poseWin: [0.0, 1.0], speed: 0.85 * speed });
+      // back over the edge and down to the thigh, one continuous motion
+      await hand.moveTo({ wrist: hand.restWrist, quat: hand.restQuat, pose: hand.restPose, plant: 1, poseWin: [0.1, 0.8], speed: 1.05 * speed, via: [this.edgePoint(hand), this.sidePoint(hand)] });
       return;
     }
     await hand.moveTo({ wrist: hand.restWrist, quat: hand.restQuat, pose: hand.restPose, plant: 1, poseWin: [0.3, 1.0], speed: 1.1 * speed });
@@ -247,16 +251,14 @@ export class Director {
   async takeTurn(hand, list, pile) {
     this.foley.rustle(1, this.pan(hand.wrist));
     for (const m of list) m.state = 'taken';
-    await this.rise(hand);
     await this.gather(hand, list);
     await this.dropOnPile(hand, pile);
     await this.goRest(hand);
   }
 
   // ---------------------------------------------------------------- rebuild at the end of a game
-  async rebuild(hand, pile, slots, reverse) {
+  async rebuild(hand, pile, slots, reverse, label = null) {
     const order = slots.slice().sort((a, b) => (reverse ? b.row - a.row : a.row - b.row) || a.col - b.col);
-    if (order.length && pile.items.length) await this.rise(hand);
     while (order.length) {
       const n = Math.min(4, order.length, pile.items.length);
       if (n === 0) break;
@@ -265,10 +267,13 @@ export class Director {
       const uniq = [top, ...pile.items.filter((m) => m !== top).sort((a, b) => a.pos.distanceTo(top.pos) - b.pos.distanceTo(top.pos)).slice(0, n - 1)];
       for (const m of uniq) m.state = 'taken';
       // one grip into the heap gathers the top few together
+      if (label) DIAG.begin(`${label} ${hand.side} gather`, hand);
       await this.gather(hand, [uniq[0]], { fromPile: pile, quick: true, scoop: uniq.slice(1) });
+      if (label) DIAG.end();
       // lay each one in its slot
       while (hand.held.length && order.length) {
         const slot = order.shift();
+        if (label) DIAG.begin(`${label} ${hand.side} place r${slot.row}c${slot.col}`, hand);
         const sp = this.matches.slotPose(slot.row, slot.col);
         const axis = new THREE.Vector3(0, 0, 1).applyQuaternion(sp.quat);
         const at = sp.pos.clone();
@@ -282,9 +287,14 @@ export class Director {
         hand.release([m]);
         await this.place(m, sp, slot);
         await hand.moveTo({ tcp: at.clone().setY(at.y + 0.02), quat: q, pose: hand.held.length ? pose : POSES.reach, dur: 0.11, arc: 0, poseWin: [0, 1] });
+        if (label) DIAG.end();
       }
     }
-    if (slots.length) await this.goRest(hand, 0.9);
+    if (slots.length) {
+      if (label) DIAG.begin(`${label} ${hand.side} rest`, hand);
+      await this.goRest(hand, 0.9);
+      if (label) DIAG.end();
+    }
   }
 
   place(m, sp, slot) {
@@ -360,16 +370,27 @@ export class Director {
     this.hover = m;
     if (m) m.highlight = 1;
   }
-  toggle(m) {
+  // select or deselect one match; a match in another row starts a new selection
+  setSelected(m, on) {
     if (this.mode !== 'select' || !m || m.state !== 'row') return;
-    if (m.row !== this.selRow) this.clearSelection();
-    this.selRow = m.row;
     const i = this.selection.indexOf(m);
-    if (i >= 0) { this.selection.splice(i, 1); m.select = 0; }
-    else { this.selection.push(m); m.select = 1; }
-    if (!this.selection.length) this.selRow = -1;
+    if (on) {
+      if (i >= 0) return;
+      if (m.row !== this.selRow) this.clearSelection();
+      this.selRow = m.row;
+      this.selection.push(m);
+      m.select = 1;
+    } else {
+      if (i < 0) return;
+      this.selection.splice(i, 1);
+      m.select = 0;
+      if (!this.selection.length) this.selRow = -1;
+    }
     this.foley.tick(0.15, this.pan(m.pos));
     this.ui.setSelection(this.selection.length);
+  }
+  toggle(m) {
+    this.setSelected(m, !this.selection.includes(m));
   }
   clearSelection() {
     for (const m of this.selection) m.select = 0;
@@ -389,6 +410,17 @@ export class Director {
     r(list);
   }
   waitForPlayer() {
+    const left = this.matches.list.filter((m) => m.state === 'row');
+    if (left.length === 1) {
+      // nothing to decide: the last match is his, and he takes it
+      this.mode = 'forced';
+      const m = left[0];
+      return this.sched.wait(0.9).then(() => {
+        m.select = 1;
+        this.foley.tick(0.15, this.pan(m.pos));
+        return this.sched.wait(0.6);
+      }).then(() => { m.select = 0; return [m]; });
+    }
     this.mode = 'select';
     return new Promise((res) => {
       this._confirm = res;
@@ -408,9 +440,11 @@ export class Director {
 
   // ---------------------------------------------------------------- the loop
   async run() {
-    await this.ui.waitForStart();
+    if (this.autoplay || this.debugLoop) this.ui.dismissTitle();
+    else await this.ui.waitForStart();
     this.foley.unlock();
     await this.sched.wait(0.6);
+    if (this.debugLoop) return this.runDebugLoop();
     for (;;) {
       await this.playGame();
       await this.sched.wait(1.6);
@@ -433,7 +467,7 @@ export class Director {
       const total = counts.reduce((a, b) => a + b, 0);
       if (total === 0) break;
       if (turn === 'player') {
-        this.ui.say(this.games === 1 && total === 16 ? 'Choose matches from a single row.' : 'Your move.', 0);
+        this.ui.say(total === 1 ? 'The last match is yours.' : this.games === 1 && total === 16 ? 'Choose matches from a single row.' : 'Your move.', total === 1 ? 2.5 : 0);
         const list = await this.waitForPlayer();
         this.setHover(null);
         this.ui.say('');
@@ -486,6 +520,58 @@ export class Director {
     }
   }
 
+  // ---------------------------------------------------------------- debug: ?debug=loop
+  // The player takes the whole board apart one match at a time and lays it out again,
+  // then the opponent does the same, forever. Every move is measured (see DIAG):
+  // failures are logged to the console and kept in window.__diag.
+  async runDebugLoop() {
+    DIAG.on = true;
+    window.__diag = DIAG;
+    for (let cycle = 1; ; cycle++) {
+      for (const who of this.debugFirst === 'opponent' ? ['opponent', 'player'] : ['player', 'opponent']) {
+        this.mode = who === 'player' ? 'player-move' : 'ai-move';
+        this.ui.say(`Debug ${cycle}: ${who === 'player' ? 'you take' : 'he takes'} the board apart.`, 2.5);
+        const rows = who === 'player' ? [3, 2, 1, 0] : [0, 1, 2, 3];
+        for (const r of rows) {
+          for (const m of this.matches.inRow(r)) {
+            const hand = who === 'player' ? this.choosePlayerHand([m.pos]) : this.oHand;
+            if (who === 'player') this.pHand = hand;
+            DIAG.begin(`c${cycle} ${who} ${hand.side} take r${m.row}c${m.col}`, hand);
+            await this.takeTurn(hand, [m], this.pileFor(hand));
+            DIAG.end();
+            this.pHand = this.pHandL;
+          }
+        }
+        this.mode = 'rebuild';
+        this.ui.say(`Debug ${cycle}: ${who === 'player' ? 'you lay' : 'he lays'} it out again.`, 2.5);
+        await this.rebuildBy(who, `c${cycle} ${who}`);
+      }
+      const sum = DIAG.summary();
+      console.info(`[diag] after cycle ${cycle}: ${sum.failing} of ${sum.moves} moves flagged`, sum.fails);
+      this.ui.say(`Debug cycle ${cycle}: ${sum.failing} of ${sum.moves} moves flagged.`, 4);
+      await this.sched.wait(1);
+    }
+  }
+  // one side lays out every empty slot from its own pile(s)
+  async rebuildBy(who, label) {
+    const slots = this.matches.slots().filter((sl) => !this.matches.list.some((m) => m.state === 'row' && m.row === sl.row && m.col === sl.col));
+    const P = this.piles;
+    if (who === 'opponent') return this.rebuild(this.oHand, P.opponent, slots, false, label);
+    const { left, right } = this.splitPlayerSlots(slots, P.playerL.items.length);
+    this.pHand = this.pHandL;
+    await this.rebuild(this.pHandL, P.playerL, left, true, label);
+    this.pHand = this.pHandR;
+    await this.rebuild(this.pHandR, P.player, right, true, label);
+    this.pHand = this.pHandL;
+  }
+  // the left hand takes the nL slots it reaches most easily (relative to the right hand)
+  splitPlayerSlots(slots, nL) {
+    const pos = (sl) => this.matches.slotPose(sl.row, sl.col, false).pos;
+    const pref = slots.map((sl) => ({ sl, d: this.handCost(this.pHandL, [pos(sl)]) - this.handCost(this.pHandR, [pos(sl)]) - pos(sl).x * 0.05 }));
+    pref.sort((a, b) => a.d - b.d);
+    return { left: pref.slice(0, nL).map((p) => p.sl), right: pref.slice(nL).map((p) => p.sl) };
+  }
+
   async rebuildBoard() {
     const slots = this.matches.slots();
     const P = this.piles;
@@ -494,10 +580,8 @@ export class Director {
     const byNear = slots.slice().sort((a, b) => b.row - a.row || a.col - b.col);
     const mine = byNear.slice(0, nL + nR);
     const theirs = byNear.slice(nL + nR);
-    // his left hand takes the leftmost of his slots, the right hand the rest
-    const x = (s) => this.matches.slotPose(s.row, s.col, false).pos.x;
-    mine.sort((a, b) => x(a) - x(b));
-    const left = mine.slice(0, nL), right = mine.slice(nL);
+    // his left hand takes the slots it reaches most easily, the right hand the rest
+    const { left, right } = this.splitPlayerSlots(mine, nL);
     const playerSide = async () => {
       this.pHand = this.pHandL;
       await this.rebuild(this.pHandL, P.playerL, left, true);

@@ -1,7 +1,7 @@
 // Table, chrome band, pedestal, floor, matchbox, and the sixteen matches.
 import * as THREE from 'three';
 import { mulberry32, clamp, lerp, smoothstep } from './util.js';
-import { makeTableMaterial, makeMetalMaterial, makeFloorMaterial, makePaperMaterial, makeMatchMaterial } from './materials.js';
+import { makeTableMaterial, makeMetalMaterial, makeFloorMaterial, makePaperMaterial, makeMatchMaterial, makeGlowMaterial } from './materials.js';
 
 export const TABLE_Y = 0.74;
 export const TABLE_R = 0.37;
@@ -11,6 +11,7 @@ export const L_MAIN_ONLY = 2;
 export const L_NO_MIRROR = 3; // main + shadow, not reflected (bodies: their reflections are invisible)
 export const L_NO_SHADOW = 4; // main + mirror, casts no shadow
 export const L_TABLE = 1;
+export const L_MIRROR_ONLY = 5; // seen only in the stone's reflection
 
 export function buildTable(scene) {
   const R = TABLE_R;
@@ -68,7 +69,17 @@ export function buildTable(scene) {
   box.rotation.y = -0.38;
   scene.add(box);
 
-  return { top, rim, box };
+  // A tall bright strip somewhere behind the opponent (a lit doorway, out of frame).
+  // It never shows directly: only its reflection, a wavering streak down the right
+  // side of the stone that his arm slightly cuts into, as in the shot.
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 2.4), makeGlowMaterial());
+  glow.position.set(0.585, 2.15, -2.4);
+  glow.rotation.z = -0.1; // leans so its reflection runs straight down the frame
+  glow.layers.set(L_MIRROR_ONLY);
+  glow.frustumCulled = false;
+  scene.add(glow);
+
+  return { top, rim, box, glow };
 }
 
 // ------------------------------------------------------------------ matches

@@ -138,7 +138,7 @@ float shadowPCSS(vec3 P, vec3 N, float soft) {
   if (nB < 0.5) return 1.0;
   float dB = sumB / nB;
   float pen = (dR - dB) / dB * uShadowParams.w / dR;
-  pen = clamp(pen * soft, tex * 0.9, tex * 18.0);
+  pen = clamp(pen * soft, tex * 1.5, tex * 18.0); // never a hard one-texel edge
   float lit = 0.0;
   for (int i = 0; i < SHADOW_TAPS; i++) {
     vec2 o = rot * DISK[i * (${N_DISK} / SHADOW_TAPS)] * pen;
@@ -341,6 +341,33 @@ vec4 finalColor(vec3 col, vec3 P) {
 // Standard vertex shader: optional GPU skinning, world-space varyings.
 export const VERT = /* glsl */ `
 #include <skinning_pars_vertex>
+#ifdef USE_SKINNING
+// Dual-quaternion skinning: blends rigid transforms instead of matrices, so a
+// sharply bent wrist or a swung thumb keeps its volume instead of pinching.
+vec4 m2q(mat4 m) {
+  float t = m[0][0] + m[1][1] + m[2][2];
+  if (t > 0.0) {
+    float s = sqrt(t + 1.0) * 2.0;
+    return vec4((m[1][2] - m[2][1]) / s, (m[2][0] - m[0][2]) / s, (m[0][1] - m[1][0]) / s, 0.25 * s);
+  } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+    float s = sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0;
+    return vec4(0.25 * s, (m[1][0] + m[0][1]) / s, (m[2][0] + m[0][2]) / s, (m[1][2] - m[2][1]) / s);
+  } else if (m[1][1] > m[2][2]) {
+    float s = sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0;
+    return vec4((m[1][0] + m[0][1]) / s, 0.25 * s, (m[2][1] + m[1][2]) / s, (m[2][0] - m[0][2]) / s);
+  }
+  float s = sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0;
+  return vec4((m[2][0] + m[0][2]) / s, (m[2][1] + m[1][2]) / s, 0.25 * s, (m[0][1] - m[1][0]) / s);
+}
+// dual part of a rigid transform: 0.5 * (t, 0) * r
+vec4 dualPart(vec4 r, vec3 t) { return 0.5 * vec4(r.w * t + cross(t, r.xyz), -dot(t, r.xyz)); }
+void dqAdd(mat4 m, float w, vec4 r0, inout vec4 b0, inout vec4 be) {
+  vec4 r = m2q(m);
+  float s = dot(r, r0) < 0.0 ? -w : w;
+  b0 += r * s;
+  be += dualPart(r, m[3].xyz) * s;
+}
+#endif
 varying vec3 vW;
 varying vec3 vN;
 varying vec3 vL;
@@ -368,8 +395,24 @@ void main() {
   transformed.z += uBreath * 0.004 * smoothstep(0.15, 0.45, position.y) * smoothstep(0.0, 0.1, position.z);
 #endif
 #include <skinbase_vertex>
-#include <skinnormal_vertex>
-#include <skinning_vertex>
+#ifdef USE_SKINNING
+  {
+    vec4 r0 = m2q(boneMatX);
+    vec4 b0 = vec4(0.0), be = vec4(0.0);
+    dqAdd(boneMatX, skinWeight.x, r0, b0, be);
+    dqAdd(boneMatY, skinWeight.y, r0, b0, be);
+    dqAdd(boneMatZ, skinWeight.z, r0, b0, be);
+    dqAdd(boneMatW, skinWeight.w, r0, b0, be);
+    float len = length(b0);
+    b0 /= len; be /= len;
+    vec3 p = (bindMatrix * vec4(transformed, 1.0)).xyz;
+    p += 2.0 * cross(b0.xyz, cross(b0.xyz, p) + b0.w * p) + 2.0 * (b0.w * be.xyz - be.w * b0.xyz + cross(b0.xyz, be.xyz));
+    transformed = (bindMatrixInverse * vec4(p, 1.0)).xyz;
+    vec3 n = mat3(bindMatrix) * objectNormal;
+    n += 2.0 * cross(b0.xyz, cross(b0.xyz, n) + b0.w * n);
+    objectNormal = mat3(bindMatrixInverse) * n;
+  }
+#endif
   vec4 wp = modelMatrix * vec4(transformed, 1.0);
   vW = wp.xyz;
   vN = normalize(mat3(modelMatrix) * objectNormal);

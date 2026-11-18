@@ -163,38 +163,11 @@ ${FRAG_PROLOGUE}
   float hair = vAux.x;
   // --- skin
   float h = (vnoise(vL * 2400.0) - 0.5) * 0.00003 * detail(0.0005, fp) + (vnoise(vL * 500.0) - 0.5) * 0.00006 * detail(0.002, fp);
-  vec3 p = vec3(abs(vL.x), vL.y, vL.z);
-  float front = step(0.05, vL.z);
-  // eyes: sclera, iris, pupil and a wet surface
-  vec3 eq = p - vec3(0.0315, 0.096, 0.073);
-  float er = length(eq);
-  float eye = smoothstep(0.0128, 0.0121, er) * front;
-  float cosA = eq.z / max(er, 1e-4);
-  float iris = smoothstep(0.86, 0.89, cosA);
-  float pupil = smoothstep(0.975, 0.982, cosA);
-  // lash line where the lids meet the eye, brows over the ridge
-  float lash = smoothstep(0.0022, 0.0, abs(er - 0.0131)) * smoothstep(0.0, 0.004, eq.y + 0.001) * front;
-  float browY = 0.1185 - 0.12 * (p.x - 0.028) * (p.x - 0.028) * 30.0;
-  float brow = smoothstep(0.005, 0.001, abs(p.y - browY)) * smoothstep(0.009, 0.013, p.x) * smoothstep(0.050, 0.042, p.x) * step(0.066, vL.z);
-  float browHairs = vnoise(vec3(p.x * 260.0, p.y * 180.0, 1.0));
-  // thin lips, a dark parting, a blue-grey shadow of beard along the jaw
-  float lips = smoothstep(0.0065, 0.003, abs(p.y - 0.031)) * smoothstep(0.024, 0.016, p.x) * step(0.083, vL.z);
-  float parting = smoothstep(0.0013, 0.0, abs(p.y - 0.031)) * smoothstep(0.025, 0.018, p.x) * step(0.09, vL.z);
-  float beard = smoothstep(0.045, 0.015, p.y) * smoothstep(0.035, 0.07, vL.z + p.x * 0.6) * (1.0 - lips) * smoothstep(-0.03, 0.0, p.y);
   float earThin = vAux.z;
-  vec3 Ns = bumpNormal(vW, N, h * (1.0 - eye));
+  vec3 Ns = bumpNormal(vW, N, h);
   vec3 alb = vec3(1.0, 0.72, 0.60) * (uSkinTone / 0.778) * (0.88 + 0.22 * fbm3(vL * 90.0));
-  alb *= 1.0 - 0.18 * beard * (0.7 + 0.3 * vnoise(vL * 1500.0));
-  alb.gb *= 1.0 - 0.18 * lips;
-  alb *= 1.0 - 0.75 * parting;
-  alb *= 1.0 - 0.7 * brow * (0.8 + 0.2 * browHairs);
-  alb *= 1.0 - 0.7 * lash;
   alb.gb *= 1.0 - 0.12 * earThin;   // ears are thin: they glow when light passes through
-  vec3 eyeAlb = mix(vec3(0.52, 0.5, 0.48), vec3(0.09, 0.1, 0.11), iris);
-  eyeAlb = mix(eyeAlb, vec3(0.01), pupil);
-  alb = mix(alb, eyeAlb, eye);
-  float rough = mix(0.5, 0.06, eye);
-  vec3 skinCol = shadeSkin(vW, Ns, N, V, alb, rough, earThin, curvature(N, vW), 1.0, mix(0.18, 3.0, eye));
+  vec3 skinCol = shadeSkin(vW, Ns, N, V, alb, 0.5, earThin, curvature(N, vW), 1.0, 0.18);
 
   // --- hair: dark, slicked with pomade (Kajiya-Kay, two shifted lobes)
   vec3 T = normalize(vAux3 - N * dot(vAux3, N));
@@ -358,6 +331,24 @@ ${FRAG_PROLOGUE}
   });
 }
 
+// --------------------------------------------------------------------- distant lit strip (mirror only)
+export function makeGlowMaterial() {
+  return make({
+    name: 'glow',
+    side: THREE.DoubleSide,
+    frag: /* glsl */ `
+void main() {
+${FRAG_PROLOGUE}
+  // soft-edged bright strip: a hot core, a glowing falloff, a little unevenness down its length
+  float u = vL.x / 0.13, v = vL.y / 1.2;
+  float core = exp(-u * u * 7.0) + 0.22 * exp(-u * u * 1.6);
+  float along = 0.85 + 0.15 * sin(v * 5.0 + 0.7) + 0.08 * (vnoise(vec3(0.0, v * 9.0, 1.0)) - 0.5);
+  float ends = smoothstep(1.0, 0.75, abs(v));
+  gl_FragColor = finalColor(vec3(2.1 * core * along * ends), vW);
+}`,
+  });
+}
+
 // --------------------------------------------------------------------- table top
 export function makeTableMaterial() {
   return make({
@@ -470,6 +461,14 @@ ${FRAG_PROLOGUE}
 
   // ---- planar reflection, blurred only by roughness x height above the stone
   vec2 ruv = vRefl.xy / vRefl.w + (N.xz - Ng.xz) * (0.25 / dist);
+  // the slab is not perfectly flat: slow undulations a fraction of a degree deep.
+  // Invisible in the stone itself, they bend the reflections of distant things
+  // (the far lit strip) into wavering streaks while near hands stay crisp.
+  float far = clamp(textureLod(uReflTex, ruv, 3.0).a, 0.0, 2.5);
+  vec2 wav = vec2(
+    sin(q.y * 41.0 + sin(q.x * 23.0 + 1.3) * 1.4) * 0.55 + sin(q.y * 97.0 + q.x * 31.0 + 2.1) * 0.25 + (fbm2(q * 9.0 + 3.7) - 0.5) * 0.9,
+    sin(q.x * 37.0 + q.y * 13.0 + 0.4) * 0.3);
+  ruv += wav * far * 0.0075;
   vec4 r0 = textureLod(uReflTex, ruv, 0.0);
   float hgt = min(r0.a, 0.6);
   float blurW = 0.0003 + hgt * (rough * 0.14 + 0.0018);
