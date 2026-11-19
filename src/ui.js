@@ -1,55 +1,76 @@
-// DOM overlay: title card, subtitles, the take button, score, sound toggle.
+// DOM overlay: the settings panel (behind the gear), subtitles, the take button.
 export class UI {
   constructor(foley) {
     this.foley = foley;
     this.el = {
       title: document.getElementById('title'),
-      begin: document.getElementById('begin'),
+      gear: document.getElementById('gear'),
+      note: document.getElementById('note'),
       sub: document.getElementById('sub'),
       take: document.getElementById('take'),
       clear: document.getElementById('clear'),
-      score: document.getElementById('score'),
-      sound: document.getElementById('sound'),
+      protest: document.getElementById('protest'),
       loading: document.getElementById('loading'),
+      modeAI: document.getElementById('mode-ai'),
+      modeTwo: document.getElementById('mode-two'),
+      modeAuto: document.getElementById('mode-auto'),
     };
+    // one player against him, or two people taking turns at the same screen
+    let saved = 'ai';
+    try { saved = localStorage.getItem('nim-mode') || 'ai'; } catch (e) { /* storage unavailable */ }
+    const q = new URLSearchParams(location.search).get('players');
+    this.players = q === '2' ? 'two' : q === '1' ? 'ai' : saved === 'two' ? 'two' : 'ai';
+    this.autoplay = new URLSearchParams(location.search).has('autoplay');
+    this.onPlayers = null; // (mode) => void
+    this.onAutoplay = null; // (on) => void
+    this._mark();
     this.subTimer = 0;
     this.onConfirm = null;
     this.onClear = null;
     this.el.take.addEventListener('click', (e) => { e.stopPropagation(); this.onConfirm && this.onConfirm(); });
     this.el.clear.addEventListener('click', (e) => { e.stopPropagation(); this.onClear && this.onClear(); });
-    this.el.sound.addEventListener('click', (e) => {
-      e.stopPropagation();
-      foley.unlock();
-      foley.setMuted(!foley.muted);
-      this.el.sound.textContent = foley.muted ? 'sound off' : 'sound on';
-      this.el.sound.setAttribute('aria-pressed', String(!foley.muted));
+    this.onProtest = null;
+    this.el.protest.addEventListener('click', (e) => { e.stopPropagation(); this.onProtest && this.onProtest(); });
+    // sound is always on; browsers only let it start after a gesture
+    const unlock = () => foley.unlock();
+    window.addEventListener('pointerdown', unlock, true);
+    window.addEventListener('keydown', unlock, true);
+    // settings: the gear opens the old title card; click outside its buttons (or Esc) to close
+    this.el.gear.addEventListener('click', (e) => { e.stopPropagation(); this.toggleSettings(); });
+    this.el.title.addEventListener('click', (e) => { if (e.target === this.el.title) this.toggleSettings(false); });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.settingsOpen) this.toggleSettings(false); });
+    const pick = (mode) => {
+      if (mode === this.players) return;
+      this.players = mode;
+      try { localStorage.setItem('nim-mode', mode); } catch (err) { /* ignore */ }
+      this._mark();
+      this.el.note.textContent = 'from the next game';
+      this.onPlayers && this.onPlayers(mode);
+    };
+    this.el.modeAI.addEventListener('click', () => pick('ai'));
+    this.el.modeTwo.addEventListener('click', () => pick('two'));
+    this.el.modeAuto.addEventListener('click', () => {
+      this.autoplay = !this.autoplay;
+      this._mark();
+      this.onAutoplay && this.onAutoplay(this.autoplay);
     });
-    const touch = matchMedia('(pointer: coarse)').matches;
-    this.el.begin.textContent = touch ? 'tap to begin' : 'click to begin';
+  }
+  get settingsOpen() { return this.el.title.classList.contains('show'); }
+  toggleSettings(open = !this.settingsOpen) {
+    this.el.title.classList.toggle('show', open);
+    this.el.title.setAttribute('aria-hidden', String(!open));
+    this.el.gear.setAttribute('aria-expanded', String(open));
+    if (!open) this.el.note.textContent = '';
+  }
+  _mark() {
+    this.el.modeAI.classList.toggle('pick', this.players === 'ai');
+    this.el.modeTwo.classList.toggle('pick', this.players === 'two');
+    this.el.modeAuto.classList.toggle('pick', this.autoplay);
+    this.el.modeAuto.setAttribute('aria-pressed', String(this.autoplay));
+    this.el.modeAuto.textContent = this.autoplay ? 'autoplay on' : 'autoplay off';
   }
   ready() {
     this.el.loading.classList.add('gone');
-    this.el.title.classList.add('show');
-  }
-  // skip the title card (autoplay and debug runs start by themselves)
-  dismissTitle() {
-    this.el.title.classList.remove('show');
-    this.el.title.classList.add('gone');
-  }
-  waitForStart() {
-    return new Promise((res) => {
-      const go = (e) => {
-        if (e && e.target && e.target.id === 'sound') return;
-        window.removeEventListener('pointerup', go);
-        window.removeEventListener('keydown', key);
-        this.el.title.classList.remove('show');
-        this.el.title.classList.add('gone');
-        res();
-      };
-      const key = (e) => { if (e.key === 'Enter' || e.key === ' ') go(); };
-      window.addEventListener('pointerup', go);
-      window.addEventListener('keydown', key);
-    });
   }
   say(text, hold = 0) {
     const s = this.el.sub;
@@ -70,7 +91,16 @@ export class UI {
       this.el.clear.classList.remove('show');
     }
   }
-  setScore(s) {
-    this.el.score.textContent = `you ${s.player}  ·  ${s.opponent} him`;
+  // after a lost game: offer to protest; resolves true if clicked within `sec`
+  offerProtest(sec, auto = false) {
+    return new Promise((res) => {
+      const b = this.el.protest;
+      let t = 0;
+      const done = (v) => { clearTimeout(t); this.onProtest = null; b.classList.remove('show'); res(v); };
+      this.onProtest = () => done(true);
+      b.classList.add('show');
+      t = setTimeout(() => done(false), sec * 1000);
+      if (auto) setTimeout(() => this.onProtest && this.onProtest(), 1800);
+    });
   }
 }

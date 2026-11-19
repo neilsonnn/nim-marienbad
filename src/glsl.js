@@ -8,6 +8,25 @@ for (let i = 0; i < N_DISK; i++) {
   disk.push(`vec2(${(r * Math.cos(a)).toFixed(5)}, ${(r * Math.sin(a)).toFixed(5)})`);
 }
 
+// Value noise & fbm (shared with the one-time stone bake)
+export const NOISE = /* glsl */ `
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float hash13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+
+float vnoise(vec3 p) {
+  vec3 i = floor(p); vec3 f = fract(p); vec3 u = f * f * (3.0 - 2.0 * f);
+  float a = hash13(i), b = hash13(i + vec3(1, 0, 0)), c = hash13(i + vec3(0, 1, 0)), d = hash13(i + vec3(1, 1, 0));
+  float e = hash13(i + vec3(0, 0, 1)), f1 = hash13(i + vec3(1, 0, 1)), g = hash13(i + vec3(0, 1, 1)), h = hash13(i + vec3(1, 1, 1));
+  return mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y), mix(mix(e, f1, u.x), mix(g, h, u.x), u.y), u.z);
+}
+float vnoise2(vec2 p) {
+  vec2 i = floor(p); vec2 f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.07 + 13.7; a *= 0.5; } return s / 0.9375; }
+float fbm2(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise2(p); p = p * 2.11 + 7.3; a *= 0.5; } return s / 0.9375; }
+`;
+
 export const COMMON = /* glsl */ `
 #define PI 3.14159265359
 #define TAU 6.28318530718
@@ -41,22 +60,7 @@ float pow5(float x) { float x2 = x * x; return x2 * x2 * x; }
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 
-float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
-float hash13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
-
-float vnoise(vec3 p) {
-  vec3 i = floor(p); vec3 f = fract(p); vec3 u = f * f * (3.0 - 2.0 * f);
-  float a = hash13(i), b = hash13(i + vec3(1, 0, 0)), c = hash13(i + vec3(0, 1, 0)), d = hash13(i + vec3(1, 1, 0));
-  float e = hash13(i + vec3(0, 0, 1)), f1 = hash13(i + vec3(1, 0, 1)), g = hash13(i + vec3(0, 1, 1)), h = hash13(i + vec3(1, 1, 1));
-  return mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y), mix(mix(e, f1, u.x), mix(g, h, u.x), u.y), u.z);
-}
-float vnoise2(vec2 p) {
-  vec2 i = floor(p); vec2 f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y);
-}
-float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.07 + 13.7; a *= 0.5; } return s / 0.9375; }
-float fbm2(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise2(p); p = p * 2.11 + 7.3; a *= 0.5; } return s / 0.9375; }
-
+${NOISE}
 // How much of a procedural feature of world period 'period' survives the pixel footprint.
 float detail(float period, float footprint) { return 1.0 - smoothstep(0.18, 0.55, footprint / period); }
 
@@ -114,10 +118,27 @@ float lightPool(vec3 P) { vec3 d = P - vec3(0.0, uTableY + 0.1, 0.0); return exp
 // ---------------------------------------------------------------- shadows (PCSS-lite)
 const vec2 DISK[${N_DISK}] = vec2[${N_DISK}](${disk.join(', ')});
 float linShadow(float d) { float n = uShadowParams.y, f = uShadowParams.z; float z = d * 2.0 - 1.0; return 2.0 * n * f / (f + n - z * (f - n)); }
-float shadowPCSS(vec3 P, vec3 N, float soft) {
-  vec3 L = normalize(uKeyPos - P);
+// Geometric (unbumped, front-facing) normal of the fragment being shaded: shadow
+// offsets must follow the real surface, not the bump-mapped one.
+vec3 gNg = vec3(0.0, 1.0, 0.0);
+// world size of one shadow-map texel at distance d from the lamp
+float shadowTexel(float d) { return d * uShadowParams.x * uKeySize / uShadowParams.w; }
+// P: surface point, N: its geometric normal, soft: penumbra scale, thick: how far a
+// surface turned away from the lamp may look back through its own body.
+float shadowPCSS(vec3 P, vec3 N, float soft, float thick) {
+  vec3 toL = uKeyPos - P;
+  float dl = length(toL);
+  vec3 L = toL / dl;
   float NoL = dot(N, L);
-  vec3 offP = P + N * (0.0010 + 0.0025 * (1.0 - abs(NoL)));
+  float texW = shadowTexel(dl);
+  // Receiver offsets. (1) Along the normal by a few texels, more at grazing angles, so a
+  // lit surface never shadows itself through depth quantisation. (2) Past the terminator
+  // skin and cloth still receive wrapped (scattered) light, and the map would cut it off
+  // along the object's own silhouette: a jagged, stair-stepped edge. There the lookup
+  // also steps toward the lamp through the object's own thickness, so only *other*
+  // things shadow those parts; the wrap falloff darkens them smoothly on its own.
+  float back = sat((0.3 - NoL) / 0.7);
+  vec3 offP = P + N * texW * (1.0 + 2.5 * (1.0 - abs(NoL))) + L * (thick * back);
   vec4 sc = uShadowMatrix * vec4(offP, 1.0);
   if (sc.w <= 0.0) return 1.0;
   vec2 uv = sc.xy / sc.w * 0.5 + 0.5;
@@ -127,7 +148,9 @@ float shadowPCSS(vec3 P, vec3 N, float soft) {
   float ca = cos(ang), sa = sin(ang);
   mat2 rot = mat2(ca, sa, -sa, ca);
   float tex = uShadowParams.x;
-  float bias = 0.0007 + 0.0016 * (1.0 - sat(NoL));
+  // slope-scaled depth bias (in metres along the light ray)
+  float cosT = max(abs(NoL), 0.25);
+  float bias = texW * (0.8 + 1.4 * min(sqrt(1.0 - cosT * cosT) / cosT, 3.0));
   // blocker search
   float sumB = 0.0, nB = 0.0;
   for (int i = 0; i < 6; i++) {
@@ -138,7 +161,9 @@ float shadowPCSS(vec3 P, vec3 N, float soft) {
   if (nB < 0.5) return 1.0;
   float dB = sumB / nB;
   float pen = (dR - dB) / dB * uShadowParams.w / dR;
-  pen = clamp(pen * soft, tex * 1.5, tex * 18.0); // never a hard one-texel edge
+  // never a hard few-texel edge: contact shadows keep ~2.5 texels of softness, and
+  // surfaces turning away from the lamp blur more (texels smear along them)
+  pen = clamp(pen * soft, tex * (2.5 + 3.0 * back), tex * 18.0);
   float lit = 0.0;
   for (int i = 0; i < SHADOW_TAPS; i++) {
     vec2 o = rot * DISK[i * (${N_DISK} / SHADOW_TAPS)] * pen;
@@ -161,12 +186,24 @@ vec3 faceLight(vec3 P, out vec3 L) {
 // The polished table throws the lamp back up: a virtual lamp mirrored below the stone
 // lights chins, palms and the undersides of fingers, gated by whether the bounce point
 // on the stone is itself lit (one hard shadow tap) and by the stone's Fresnel.
+// (A single hard tap here drew a stair-stepped line across the undersides of hands and
+// cuffs, where their own shadow on the stone gates the bounce. The bounce is a blurred
+// reflection of a large lamp, so its gate gets a wide, filtered edge.)
 float shadowHard(vec3 P) {
   vec4 sc = uShadowMatrix * vec4(P + vec3(0.0, 0.0015, 0.0), 1.0);
   if (sc.w <= 0.0) return 1.0;
   vec2 uv = sc.xy / sc.w * 0.5 + 0.5;
   if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0) return 1.0;
-  return step(sc.w - 0.003, linShadow(texture2D(uShadowMap, uv).r));
+  float ang = ign(gl_FragCoord.xy + 23.0) * TAU;
+  float ca = cos(ang), sa = sin(ang);
+  mat2 rot = mat2(ca, sa, -sa, ca);
+  float r = uShadowParams.x * 7.0;
+  float lit = 0.0;
+  for (int i = 0; i < 6; i++) {
+    vec2 o = rot * DISK[i * 2 + 1] * r;
+    lit += step(sc.w - 0.003, linShadow(texture2D(uShadowMap, uv + o).r));
+  }
+  return lit / 6.0;
 }
 vec3 keyLight(vec3 P, out vec3 L, out float dist);
 vec3 tableBounce(vec3 P, out vec3 Lb) {
@@ -206,8 +243,10 @@ struct Surface {
   float wrap;        // diffuse wrap (subsurface softness)
   float sheen;       // cloth sheen strength
   float sheenRough;
+  float keySheen;    // scale of the sheen under the key light (1 = physical)
   float ao;
   float shadowSoft;
+  float thick;       // how far past the terminator a surface may see back through itself
   float trans;       // thin-part transmission
   float specMul;
   float spec2;       // second, sharper specular lobe weight (skin oil, lacquer)
@@ -217,8 +256,8 @@ Surface surf(vec3 P, vec3 N, vec3 V) {
   Surface s;
   s.P = P; s.N = N; s.V = V;
   s.albedo = vec3(0.5); s.rough = 0.5; s.metal = 0.0; s.f0 = 0.04;
-  s.wrap = 0.0; s.sheen = 0.0; s.sheenRough = 0.5; s.ao = 1.0;
-  s.shadowSoft = 1.0; s.trans = 0.0; s.specMul = 1.0; s.spec2 = 0.0;
+  s.wrap = 0.0; s.sheen = 0.0; s.sheenRough = 0.5; s.keySheen = 1.0; s.ao = 1.0;
+  s.shadowSoft = 1.0; s.thick = 0.02; s.trans = 0.0; s.specMul = 1.0; s.spec2 = 0.0;
   return s;
 }
 
@@ -249,12 +288,13 @@ vec3 directLobe(Surface s, vec3 L, vec3 E, float shadow, float areaR) {
 vec3 shade(Surface s) {
   vec3 L; float dist;
   vec3 E = keyLight(s.P, L, dist);
-  float shadow = 1.0;
-  if (E.x > 1e-5 && dot(s.N, L) > -0.35) shadow = shadowPCSS(s.P, s.N, s.shadowSoft);
-  else if (E.x <= 1e-5) shadow = 0.0;
+  // (no cut-off by facing: a hard switch there drew a line wherever wrap light remained)
+  float shadow = E.x > 1e-5 ? shadowPCSS(s.P, gNg, s.shadowSoft, s.thick) : 0.0;
   // skin & cloth: the shadow terminator wraps softly instead of a hard edge
   float areaR = uKeySize / (2.0 * dist);
-  vec3 col = directLobe(s, L, E, shadow, areaR);
+  Surface sk = s;
+  sk.sheen *= s.keySheen;
+  vec3 col = directLobe(sk, L, E, shadow, areaR);
   // soft fills (no shadows), pooled around the table like the bounce from the stone & lamp
   float pool = lightPool(s.P);
   col += directLobe(s, uFillDir, uFillColor * pool, 1.0, 0.25);
@@ -282,8 +322,7 @@ vec3 wrapDiffuse(vec3 NoL3, vec3 w) { return sat3((NoL3 + w) / (1.0 + w)) / (1.0
 vec3 shadeSkin(vec3 P, vec3 N, vec3 Ng, vec3 V, vec3 alb, float rough, float thin, float curv, float ao, float oil) {
   vec3 L; float dist;
   vec3 E = keyLight(P, L, dist);
-  float sh = 0.0;
-  if (E.x > 1e-5 && dot(Ng, L) > -0.6) sh = shadowPCSS(P, Ng, 2.4);
+  float sh = E.x > 1e-5 ? shadowPCSS(P, Ng, 2.4, 0.04) : 0.0;
   // scattered light reaches into the shadow edge: red the furthest
   vec3 shC = max(vec3(sh), pow(vec3(sh), vec3(0.45, 0.7, 0.9)) * vec3(1.0, 0.97, 0.95));
   vec3 wrapC = vec3(0.62, 0.27, 0.15) * (0.5 + 1.1 * curv);
@@ -383,16 +422,43 @@ varying vec3 vAux3;
 #ifdef BREATH
 uniform float uBreath;
 #endif
+#ifdef SHOULDERS
+// the jacket's shoulder caps turn with the upper arms: per side (0 = body's left, +x)
+// the rotation (axis, angle) from the modelled arm to the arm now, about the joint at
+// rest (uShS0) carried to where it is now (uShS1)
+attribute float aShW;
+uniform vec4 uShRot[2];
+uniform vec3 uShS0[2];
+uniform vec3 uShS1[2];
+vec3 qrot(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+#endif
 void main() {
   vec3 transformed = position;
   vec3 objectNormal = normal;
 #ifdef BREATH
-  // chest expands, shoulders rise with each breath
+  // chest expands, shoulders rise with each breath (not the parts that move with the
+  // arms: the sleeves around them don't breathe)
+  float bw = uBreath;
+#ifdef SHOULDERS
+  bw *= 1.0 - aShW;
+#endif
   float chest = smoothstep(0.10, 0.30, position.y) * (1.0 - smoothstep(0.46, 0.58, position.y));
   float front = 0.55 + 0.45 * normal.z;
-  transformed += normal * uBreath * 0.0075 * chest * front;
-  transformed.y += uBreath * 0.0045 * smoothstep(0.30, 0.52, position.y);
-  transformed.z += uBreath * 0.004 * smoothstep(0.15, 0.45, position.y) * smoothstep(0.0, 0.1, position.z);
+  transformed += normal * bw * 0.0075 * chest * front;
+  transformed.y += bw * 0.0045 * smoothstep(0.30, 0.52, position.y);
+  transformed.z += bw * 0.004 * smoothstep(0.15, 0.45, position.y) * smoothstep(0.0, 0.1, position.z);
+#endif
+#ifdef SHOULDERS
+  if (aShW > 0.0) {
+    bool lft = position.x > 0.0;
+    vec4 ra = lft ? uShRot[0] : uShRot[1];
+    vec3 s0 = lft ? uShS0[0] : uShS0[1];
+    vec3 s1 = lft ? uShS1[0] : uShS1[1];
+    float h = 0.5 * ra.w * aShW;
+    vec4 q = vec4(ra.xyz * sin(h), cos(h));
+    transformed = mix(s0, s1, aShW) + qrot(q, transformed - s0);
+    objectNormal = qrot(q, objectNormal);
+  }
 #endif
 #include <skinbase_vertex>
 #ifdef USE_SKINNING
@@ -447,6 +513,7 @@ export const FRAG_PROLOGUE = /* glsl */ `
   if (uPass == 1 && vW.y < uTableY - 0.0004) discard;
   vec3 N = normalize(vN);
   if (!gl_FrontFacing) N = -N;
+  gNg = N;
   vec3 V = normalize(cameraPosition - vW);
   float fp = length(fwidth(vW));
 `;

@@ -1,6 +1,6 @@
 // Nim — boot, render passes, camera framing, input, adaptive quality.
 import * as THREE from 'three';
-import { G, OCC_N, setQuality, makeSkinMaterial, makeHeadMaterial, makeClothMaterial, makeShirtMaterial, makeMetalMaterial } from './materials.js';
+import { G, OCC_N, setQuality, makeSkinMaterial, makeHeadMaterial, makeClothMaterial, makeShirtMaterial, makeMetalMaterial, bakeStone } from './materials.js';
 import { buildTable, MatchSet, TABLE_Y, TABLE_R, L_TABLE, L_MAIN_ONLY, L_NO_MIRROR, L_NO_SHADOW, L_MIRROR_ONLY, ROW_X0, ROW_DX, ROW_Z } from './world.js';
 import { initPoses, POSES } from './handModel.js';
 import { Actor } from './actors.js';
@@ -45,7 +45,7 @@ mirrorCam.layers.enable(L_MIRROR_ONLY);
 // near plane close to the lamp so nothing between it and the bodies is ever clipped
 const lightCam = new THREE.PerspectiveCamera(58, 1, 0.05, 3.4);
 lightCam.layers.set(0);
-lightCam.layers.enable(L_TABLE); // the stone shades the floor & pedestal
+lightCam.layers.enable(L_TABLE); // the stone shades the floor
 lightCam.layers.enable(L_NO_MIRROR);
 
 // ------------------------------------------------------------------ lighting rig
@@ -74,8 +74,8 @@ function applyLights() {
 // ------------------------------------------------------------------ camera framing (the shot)
 // Reference composition authored for a 1.85:1 frame; other aspects keep the table in view.
 const SHOT = {
-  pos: new THREE.Vector3(0.0, 1.53, 1.425),
-  target: new THREE.Vector3(-0.10, 0.765, 0.0),
+  pos: new THREE.Vector3(-0.22, 1.53, 1.40), // left of our man, so he sits at the far left
+  target: new THREE.Vector3(0, TABLE_Y, 0), // dead centre of the table
   hfov: 30,
   aspect: 1.845,
 };
@@ -87,8 +87,118 @@ if (params.has('cam')) {
   if (c[6]) SHOT.hfov = c[6];
 }
 // Narrow frames tighten the lens toward the board (a closer, taller shot).
-const PORTRAIT = { hfov: 21.5, target: new THREE.Vector3(-0.005, 0.758, -0.02) };
-const MIN_ASPECT = 0.78; // narrower screens get a letterboxed 0.78 frame
+const PORTRAIT = { hfov: 21.5, target: new THREE.Vector3(0, TABLE_Y, 0) };
+const MIN_ASPECT = 0.78; // at this aspect and narrower, the portrait lens is used in full
+const BASE = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
+// ------------------------------------------------------------------ the viewer's nudge
+// Scroll / pinch dollies toward the shot's own aim point (so it never re-aims), right-drag
+// turns the camera a few degrees around it. Each control keeps a raw value; what is shown
+// is a soft clamp whose slope falls off as a Gaussian (an erf curve), so it eases to a
+// stop at the edge instead of hitting a wall. The camera then glides toward it.
+const VIEW = {
+  zoomLo: Math.log(0.42), zoomHi: Math.log(1.32), // dolly distance as a factor of the shot's
+  zoomDefault: Math.log(0.912), // lined up by hand with ?camdebug
+  yawMax: 14 * DEG, pitchMax: 9 * DEG,
+  // the resting view swings round the table to the right and up from the shot, which
+  // looks down from higher and puts our man further over to the left (wiggle centred here)
+  yaw0: 15.1 * DEG, pitch0: 6.8 * DEG,
+  // optional turn of the camera where it stands (none: it looks straight at the table's centre)
+  turnRight: 0, tiltDown: 0,
+  // sideways slide of the whole camera (metres, + is screen-right) and how far the viewer may slide it
+  pan0: -0.089, panMax: 0.3,
+};
+// ?camdebug: free the limits, show the live view and copy it (paste the line back to Claude)
+const CAMDEBUG = params.has('camdebug');
+if (CAMDEBUG) Object.assign(VIEW, { zoomLo: Math.log(0.25), zoomHi: Math.log(2.5), yawMax: 80 * DEG, pitchMax: 35 * DEG, panMax: 1.5 });
+const view = { zRaw: VIEW.zoomDefault, yawRaw: 0, pitchRaw: 0, panRaw: 0, z: VIEW.zoomDefault, yaw: 0, pitch: 0, pan: 0 };
+// erf (Abramowitz & Stegun 7.1.26, |error| < 1.5e-7)
+function erf(x) {
+  const s = Math.sign(x), a = Math.abs(x), t = 1 / (1 + 0.3275911 * a);
+  return s * (1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-a * a));
+}
+// identity through the middle; within a band w of each limit the slope falls off as a
+// Gaussian, exp(-pi/4 (d/w)^2), so it eases toward the limit and never quite reaches it
+const SOFT = Math.sqrt(Math.PI) / 2;
+function softClamp(x, lo, hi, band = 0.5) {
+  const w = ((hi - lo) / 2) * band;
+  if (x > hi - w) return hi - w + w * erf((SOFT * (x - (hi - w))) / w);
+  if (x < lo + w) return lo + w + w * erf((SOFT * (x - (lo + w))) / w);
+  return x;
+}
+// raw values stop a little past where the curve has flattened, so coming back responds at once
+function rawClamp(x, lo, hi, band = 0.5) {
+  const w = ((hi - lo) / 2) * band;
+  return clamp(x, lo - 1.2 * w, hi + 1.2 * w);
+}
+const ZB = 0.3; // zoom: the soft band is the outer 30% of each half of the range
+view.z = softClamp(view.zRaw, VIEW.zoomLo, VIEW.zoomHi, ZB);
+function nudgeZoom(d) { view.zRaw = rawClamp(view.zRaw + d, VIEW.zoomLo, VIEW.zoomHi, ZB); }
+function nudgePan(d) { view.panRaw = rawClamp(view.panRaw + d, -VIEW.panMax, VIEW.panMax); }
+function nudgeOrbit(dx, dy) {
+  view.yawRaw = rawClamp(view.yawRaw + dx, -VIEW.yawMax, VIEW.yawMax);
+  view.pitchRaw = rawClamp(view.pitchRaw - dy, -VIEW.pitchMax, VIEW.pitchMax);
+}
+const _vd = new THREE.Vector3(), _vr = new THREE.Vector3(), _vt = new THREE.Vector3(), _UPV = new THREE.Vector3(0, 1, 0);
+function applyView() {
+  // orbit (right-drag) around the shot's aim point at the reference distance...
+  _vd.subVectors(BASE.pos, BASE.target);
+  _vr.crossVectors(_UPV, _vd).normalize();
+  _vd.applyAxisAngle(_vr, -(view.pitch + VIEW.pitch0)).applyAxisAngle(_UPV, view.yaw + VIEW.yaw0);
+  const dist = _vd.length();
+  camera.position.copy(BASE.target).add(_vd);
+  // ...turn the camera where it stands (right, then down)...
+  _vd.negate().applyAxisAngle(_UPV, -VIEW.turnRight);
+  _vr.crossVectors(_vd, _UPV).normalize();
+  _vd.applyAxisAngle(_vr, -VIEW.tiltDown).setLength(dist);
+  _vt.copy(camera.position).add(_vd); // where it looks
+  // ...slide it sideways (truck) without turning...
+  const pan = VIEW.pan0 + view.pan;
+  camera.position.addScaledVector(_vr, pan);
+  _vt.addScaledVector(_vr, pan);
+  // ...then zoom is a pure dolly along the line of sight: closer or further, never turning
+  camera.position.copy(_vt).addScaledVector(_vd, -Math.exp(view.z));
+  camera.lookAt(_vt);
+  camera.updateMatrixWorld();
+}
+function updateView(dt) {
+  if (orbit.on) return;
+  const k = 1 - Math.exp(-dt * 9);
+  const tz = softClamp(view.zRaw, VIEW.zoomLo, VIEW.zoomHi, ZB);
+  const ty = softClamp(view.yawRaw, -VIEW.yawMax, VIEW.yawMax);
+  const tp = softClamp(view.pitchRaw, -VIEW.pitchMax, VIEW.pitchMax);
+  const tx = softClamp(view.panRaw, -VIEW.panMax, VIEW.panMax);
+  if (Math.abs(tz - view.z) + Math.abs(ty - view.yaw) + Math.abs(tp - view.pitch) + Math.abs(tx - view.pan) < 1e-6) return;
+  view.pan += (tx - view.pan) * k;
+  view.z += (tz - view.z) * k;
+  view.yaw += (ty - view.yaw) * k;
+  view.pitch += (tp - view.pitch) * k;
+  applyView();
+  if (CAMDEBUG) showCamDebug();
+}
+let camDbgEl = null;
+function camLine() {
+  const f = (x) => +(x / DEG).toFixed(1);
+  return `camera: yaw0 ${f(VIEW.yaw0 + view.yaw)}°, pitch0 ${f(VIEW.pitch0 + view.pitch)}°, pan0 ${(VIEW.pan0 + view.pan).toFixed(3)} m, zoom ${Math.exp(view.z).toFixed(3)}`;
+}
+function showCamDebug() {
+  if (!camDbgEl) {
+    camDbgEl = document.createElement('div');
+    camDbgEl.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:5;display:flex;gap:10px;align-items:center;font:12px/1.4 ui-monospace,Menlo,monospace;color:#ece9e2;background:rgba(0,0,0,0.6);padding:6px 10px;border:1px solid rgba(236,233,226,0.3);border-radius:4px;pointer-events:auto';
+    const t = document.createElement('span');
+    const b = document.createElement('button');
+    b.textContent = 'copy';
+    b.style.cssText = 'opacity:1;pointer-events:auto;font:inherit;padding:2px 8px;border:1px solid rgba(236,233,226,0.5);letter-spacing:0';
+    b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try { await navigator.clipboard.writeText(camLine()); b.textContent = 'copied'; }
+      catch (err) { const r = document.createRange(); r.selectNodeContents(t); getSelection().removeAllRanges(); getSelection().addRange(r); b.textContent = 'select + copy'; }
+      setTimeout(() => (b.textContent = 'copy'), 1500);
+    });
+    camDbgEl.append(t, b);
+    document.body.append(camDbgEl);
+  }
+  camDbgEl.firstChild.textContent = camLine();
+}
 function frameCamera(w, h) {
   const aspect = w / h;
   // blend between the portrait and the reference composition
@@ -102,17 +212,16 @@ function frameCamera(w, h) {
   const tgt = params.has('cam') ? SHOT.target.clone() : PORTRAIT.target.clone().lerp(SHOT.target, k);
   camera.lookAt(tgt);
   camera.updateProjectionMatrix();
-  camera.updateMatrixWorld();
+  BASE.pos.copy(SHOT.pos);
+  BASE.target.copy(tgt);
   if (orbit.on) applyOrbit();
+  else applyView();
 }
-// size & place the canvas: full screen, or a letterboxed frame on tall phones
+// size & place the canvas: always the full page
 function layoutCanvas() {
   const vw = window.innerWidth, vh = window.innerHeight;
-  let cw = vw, ch = vh, top = 0;
-  if (vw / vh < MIN_ASPECT) {
-    ch = Math.round(vw / MIN_ASPECT);
-    top = Math.round((vh - ch) * 0.42);
-  }
+  // always the whole page, phones included (tall screens just see more above and below)
+  const cw = vw, ch = vh, top = 0;
   canvas.style.width = cw + 'px';
   canvas.style.height = ch + 'px';
   canvas.style.top = top + 'px';
@@ -141,13 +250,21 @@ const sched = new Scheduler();
 const foley = new Foley();
 const ui = new UI(foley);
 let post, matches, table, player, opponent, director;
-let quality = isMobile ? 0.8 : 1.0;
+let quality = 1.0;
 let W = 0, H = 0;
+// Render scale: the device pixel ratio, capped by a pixel budget, then trimmed by the
+// adaptive `quality` below. Nearly every cost here is per pixel (4x MSAA half-float
+// targets, the stone, the skin), while film grain and depth of field hide the
+// difference between 1.5x and 2x density.
+const PIXEL_BUDGET = Number(params.get('budget')) * 1e6 || (isMobile ? 1.5e6 : 3.6e6);
+let renderScale = 1;
 
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const { cw, ch } = layoutCanvas();
-  const scale = dpr * quality;
+  const maxScale = Math.min(dpr, Math.sqrt(PIXEL_BUDGET / (cw * ch)));
+  const scale = maxScale * quality;
+  renderScale = scale / dpr;
   W = Math.max(2, Math.round(cw * scale));
   H = Math.max(2, Math.round(ch * scale));
   renderer.setPixelRatio(1);
@@ -169,6 +286,11 @@ function build() {
   post.dofEnabled = !params.has('nodof') && !params.has('cam');
   applyLights();
   table = buildTable(scene);
+  {
+    const stone = bakeStone(renderer, isMobile ? 1024 : 2048);
+    table.top.material.uniforms.uStoneA.value = stone.a;
+    table.top.material.uniforms.uStoneB.value = stone.b;
+  }
   matches = new MatchSet(scene);
 
   const mats = (fabric) => ({
@@ -234,24 +356,28 @@ function build() {
     pR.snapToRest();
   }
   const pl = player.hands.left;
-  pl.setRest(new THREE.Vector3(-0.235, 0.80, 0.245), quatFromYZ(new THREE.Vector3(0.5, -0.15, -0.85), new THREE.Vector3(-0.768, 0.452, -0.452)), POSES.fist);
+  // as in the still: the forearm laid across the stone in front of him, cuff showing, a
+  // composed fist lying level, back of the hand straight up, thumb wrapped round the front
+  pl.setRest(new THREE.Vector3(-0.15, 0.78, 0.25), quatFromYZ(new THREE.Vector3(1, 0, -0.04), new THREE.Vector3(0, 1, 0)), POSES.fist);
   pl.snapToRest();
   const oR = opponent.hands.right; // screen-left, the one that plays
   oR.setRest(new THREE.Vector3(-0.205, 0.785, -0.398), quatFromYZ(new THREE.Vector3(0.0, -0.34, 1.0), new THREE.Vector3(-0.08, 1.0, 0.34)), POSES.poised);
   oR.snapToRest();
   const oL = opponent.hands.left; // screen-right, splayed support hand
   // braced flat on the stone, fingers splayed toward the board: his weight rests here
-  oL.setRest(new THREE.Vector3(0.162, TABLE_Y + 0.012, -0.338), quatFromYZ(new THREE.Vector3(0.42, 0, 1.0), new THREE.Vector3(0, 1, 0)), POSES.brace);
+  oL.setRest(new THREE.Vector3(0.19, TABLE_Y + 0.012, -0.352), quatFromYZ(new THREE.Vector3(0.42, 0, 1.0), new THREE.Vector3(0, 1, 0)), POSES.brace);
   oL.brace = true;
   oL.snapToRest();
 
-  director = new Director({ sched, matches, player, opponent, ui, foley, camera });
-  director.autoplay = params.has('autoplay');
+  director = new Director({ sched, matches, player, opponent, ui, foley, camera, box: table.box });
+  director.autoplay = ui.autoplay;
+  ui.onAutoplay = (on) => director.setAutoplay(on);
   director.debugLoop = params.get('debug') === 'loop';
   director.debugFirst = params.get('first'); // ?debug=loop&first=opponent
+  director.still = params.has('still');
   ui.onConfirm = () => director.confirm();
   ui.onClear = () => director.clearSelection();
-  ui.setScore(director.score);
+  director.hideBoard(); // the opponent lays the first game out of the box
 
   if (params.has('gallery')) buildGallery();
   resize();
@@ -315,7 +441,7 @@ function pickMatch(x, y) {
 }
 // Taps and drags paint the selection: the first match touched decides whether the
 // stroke selects or deselects, and the stroke stays in that match's row.
-// Right-drag orbits the camera (debug), the wheel dollies, C puts the shot back.
+// Right-drag nudges the view a few degrees; the wheel or a pinch zooms within limits.
 let stroke = null;
 function paintAt(x, y, type) {
   if (!stroke || !director || director.mode !== 'select') return;
@@ -327,15 +453,8 @@ function paintAt(x, y, type) {
   director.setSelected(m, stroke.mode === 'on');
   if (type !== 'mouse') director.setHover(m);
 }
-const orbit = { on: false, drag: null, yaw: 0, pitch: 0, dist: 1, target: new THREE.Vector3(0, TABLE_Y, -0.03) };
-function orbitBegin() {
-  if (orbit.on) return;
-  const d = camera.position.clone().sub(orbit.target);
-  orbit.dist = d.length();
-  orbit.yaw = Math.atan2(d.x, d.z);
-  orbit.pitch = Math.asin(clamp(d.y / orbit.dist, -1, 1));
-  orbit.on = true;
-}
+// debug free camera (nim.view); orbit.drag is the right-drag in progress
+const orbit = { on: false, drag: null, yaw: 0, pitch: 0, dist: 1, target: new THREE.Vector3() };
 function applyOrbit() {
   const cp = Math.cos(orbit.pitch);
   camera.position.set(orbit.target.x + orbit.dist * cp * Math.sin(orbit.yaw), orbit.target.y + orbit.dist * Math.sin(orbit.pitch), orbit.target.z + orbit.dist * cp * Math.cos(orbit.yaw));
@@ -343,32 +462,47 @@ function applyOrbit() {
   camera.updateMatrixWorld();
 }
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+// two fingers on a touch screen pinch to zoom (and stop selecting)
+const touches = new Map();
+let pinch = null;
+const touchSpan = () => { const [p, q] = [...touches.values()]; return Math.hypot(p.x - q.x, p.y - q.y); };
+const touchMid = () => { const [p, q] = [...touches.values()]; return { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }; };
 canvas.addEventListener('pointerdown', (e) => {
-  if (e.button === 2) {
-    orbitBegin();
-    orbit.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, pan: e.shiftKey };
+  if (e.pointerType === 'touch') {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size === 2) {
+      if (stroke) { stroke = null; }
+      pinch = { span: touchSpan(), mid: touchMid() };
+      return;
+    }
+  }
+  if (e.button === 2 && e.pointerType === 'mouse') {
+    orbit.drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
     try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     return;
   }
-  if (e.button !== 0) return;
+  if (e.button !== 0 || pinch) return;
   stroke = { id: e.pointerId, mode: null, row: -1, last: { x: e.offsetX, y: e.offsetY }, touched: new Set() };
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
   paintAt(e.offsetX, e.offsetY, e.pointerType);
 });
 canvas.addEventListener('pointermove', (e) => {
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && touches.size === 2) {
+    const span = touchSpan();
+    if (span > 1 && pinch.span > 1) nudgeZoom(-Math.log(span / pinch.span));
+    const mid = touchMid();
+    nudgeOrbit(-(mid.x - pinch.mid.x) * ORBIT_PER_PX(), (mid.y - pinch.mid.y) * ORBIT_PER_PX());
+    pinch.span = span;
+    pinch.mid = mid;
+    return;
+  }
   if (orbit.drag && e.pointerId === orbit.drag.id) {
     const dx = e.clientX - orbit.drag.x, dy = e.clientY - orbit.drag.y;
     orbit.drag.x = e.clientX; orbit.drag.y = e.clientY;
-    if (orbit.drag.pan) {
-      const r = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
-      const u = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-      const k = orbit.dist * 0.0012;
-      orbit.target.addScaledVector(r, -dx * k).addScaledVector(u, dy * k);
-    } else {
-      orbit.yaw -= dx * 0.006;
-      orbit.pitch = clamp(orbit.pitch + dy * 0.005, -0.2, 1.45);
-    }
-    applyOrbit();
+    // a full-width drag is a couple of times the whole range: a gentle wiggle
+    if (e.shiftKey) nudgePan(-dx * PAN_PER_PX());
+    else nudgeOrbit(-dx * ORBIT_PER_PX(), dy * ORBIT_PER_PX());
     return;
   }
   if (stroke && e.pointerId === stroke.id) {
@@ -386,23 +520,37 @@ canvas.addEventListener('pointermove', (e) => {
   }
 });
 const endPointer = (e) => {
+  touches.delete(e.pointerId);
+  if (touches.size < 2) pinch = null;
   if (orbit.drag && e.pointerId === orbit.drag.id) orbit.drag = null;
   if (stroke && e.pointerId === stroke.id) stroke = null;
 };
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
+// trackpad: a pinch arrives as a ctrl-wheel (zoom), a two-finger drag as a plain wheel
+// (rotate). A notched mouse wheel (line mode) still zooms.
+const PAN_PER_PX = () => 0.6 / Math.max(400, canvas.clientWidth); // a full-width drag slides 60 cm
+const ORBIT_PER_PX = () => (2.2 * VIEW.yawMax * 2) / Math.max(400, canvas.clientWidth);
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  orbitBegin();
-  orbit.dist = clamp(orbit.dist * Math.exp(e.deltaY * 0.0012), 0.25, 6);
-  applyOrbit();
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+  if (e.ctrlKey) nudgeZoom(e.deltaY * unit * 0.008);
+  else if (e.deltaMode === 1) nudgeZoom(e.deltaY * unit * 0.0011);
+  else if (e.shiftKey) nudgePan((e.deltaX || e.deltaY) * PAN_PER_PX()); // shift turns vertical scroll into deltaX on macOS
+  else nudgeOrbit(e.deltaX * ORBIT_PER_PX(), e.deltaY * ORBIT_PER_PX());
 }, { passive: false });
+// Safari sends trackpad pinches as gesture events instead
+let gestureScale = 1;
+canvas.addEventListener('gesturestart', (e) => { e.preventDefault(); gestureScale = 1; });
+canvas.addEventListener('gesturechange', (e) => { e.preventDefault(); nudgeZoom(-Math.log(e.scale / gestureScale)); gestureScale = e.scale; });
+canvas.addEventListener('gestureend', (e) => e.preventDefault());
 canvas.addEventListener('dblclick', () => director && director.confirm());
 window.addEventListener('keydown', (e) => {
   if (!director) return;
   if (e.key === 'Enter') director.confirm();
   if (e.key === 'Escape') director.clearSelection();
-  if (e.key === 'c' || e.key === 'C') { orbit.on = false; resize(); }
+  // left / right arrows slide the camera sideways 1 cm a press (shift: 5 cm)
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') nudgePan((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 0.05 : 0.01));
 });
 window.addEventListener('resize', () => post && resize());
 window.addEventListener('orientationchange', () => setTimeout(() => post && resize(), 200));
@@ -429,6 +577,7 @@ const occ = [];
 function updateOccluders() {
   occ.length = 0;
   for (const m of matches.list) {
+    if (!m.mesh.visible) continue; // still in the box: no contact shadow on the stone
     const ax = m.axis(_v);
     occ.push([m.pos.x - ax.x * 0.021, m.pos.y - ax.y * 0.021, m.pos.z - ax.z * 0.021, m.pos.x + ax.x * 0.021, m.pos.y + ax.y * 0.021, m.pos.z + ax.z * 0.021, 0.0019, 1.0]);
   }
@@ -465,9 +614,10 @@ function step(dt) {
   G.uTime.value = time;
   sched.update(dt);
   director.updateLooks(dt);
-  focusDist.update(clamp(camera.position.distanceTo(director.focusPoint()), 1.35, 2.1), dt);
+  focusDist.update(clamp(camera.position.distanceTo(director.focusPoint()), 0.45, 2.4), dt);
   player.update(dt, time);
   opponent.update(dt, time);
+  director.lateUpdate(dt);
   matches.update(dt, time);
   updateFaceLight();
 }
@@ -504,30 +654,69 @@ function render() {
   post.render(mainRT.texture, time);
 }
 
-// adaptive resolution
-let acc = 0, frames = 0, cooldown = 3;
+// FPS counter (F toggles it)
+const fpsEl = document.getElementById('fps');
+let fpsOn = params.has('fps'); // debug: ?fps shows the frame-rate counter (F toggles it)
+if (fpsEl && !fpsOn) fpsEl.classList.add('off');
+window.addEventListener('keydown', (e) => {
+  if ((e.key === 'f' || e.key === 'F') && params.has('fps') && fpsEl && !e.metaKey && !e.ctrlKey) { fpsOn = !fpsOn; fpsEl.classList.toggle('off', !fpsOn); }
+});
+let fpsAcc = 0, fpsFrames = 0, fpsWorst = 0;
+function updateFps(frameMs) {
+  fpsAcc += frameMs;
+  fpsFrames++;
+  fpsWorst = Math.max(fpsWorst, frameMs);
+  if (fpsAcc < 500) return;
+  if (fpsEl && fpsOn) {
+    const fps = (1000 * fpsFrames) / fpsAcc;
+    fpsEl.textContent = `${fps.toFixed(0)} fps  ${(fpsAcc / fpsFrames).toFixed(1)} ms  worst ${fpsWorst.toFixed(0)} ms\n${W}×${H}  ${Math.round(renderScale * 100)}% of display`;
+  }
+  fpsAcc = 0;
+  fpsFrames = 0;
+  fpsWorst = 0;
+}
+
+// adaptive resolution: hold 60 fps (it steps down below ~54). Frame intervals are rounded up to whole display
+// refreshes, so headroom is invisible; instead, a level that proved too slow becomes a
+// ceiling for a while, and the scale creeps back up toward it only slowly.
+let acc = 0, frames = 0, cooldown = 3, ceiling = 1, ceilingT = 0;
 function adapt(dt) {
   acc += dt;
   frames++;
   cooldown -= dt;
+  ceilingT -= dt;
+  if (ceilingT <= 0) ceiling = 1;
   if (acc < 1.0) return;
   const avg = acc / frames;
   acc = 0;
   frames = 0;
   if (cooldown > 0 || params.has('fixed')) return;
-  if (avg > 1 / 42 && quality > 0.5) { quality = Math.max(0.5, quality * 0.85); resize(); cooldown = 2.5; }
-  else if (avg < 1 / 58 && quality < 1.0) { quality = Math.min(1.0, quality * 1.08); resize(); cooldown = 4; }
+  if (avg > 1 / 54 && quality > 0.5) {
+    ceiling = quality * 0.97;
+    ceilingT = 40;
+    quality = Math.max(0.5, quality * Math.max(0.8, Math.sqrt(1 / 60 / avg)));
+    resize();
+    cooldown = 2;
+  } else if (avg < 1 / 57 && quality < Math.min(1, ceiling) - 0.01) {
+    quality = Math.min(1, ceiling, quality * 1.05);
+    resize();
+    cooldown = 3;
+  }
 }
 
 // ?speed=N runs the simulation N times faster (testing)
 const SPEED = Math.max(1, Math.min(8, Number(params.get('speed')) || 1));
+let paused = false; // (debug: nim.pause() / nim.advance())
 // ?timer drives frames from a timer (for headless/background testing)
 const raf = params.has('timer') ? (f) => setTimeout(() => f(performance.now()), 16) : (f) => requestAnimationFrame(f);
 let last = performance.now();
 function loop(now) {
-  const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+  const frameMs = Math.max(0, now - last);
+  const dt = Math.min(0.05, frameMs / 1000);
   last = now;
-  for (let i = 0; i < SPEED; i++) step(dt);
+  updateFps(frameMs);
+  updateView(dt);
+  if (!paused) for (let i = 0; i < SPEED; i++) step(dt);
   fade = Math.min(1, fade + dt / 2.5);
   render();
   adapt(dt);
@@ -549,6 +738,7 @@ raf(() => {
     if (params.has('fade')) fade = 1;
     last = performance.now();
     raf(loop);
+    if (CAMDEBUG) showCamDebug();
     director.run();
   }, 30);
 });
@@ -566,4 +756,18 @@ window.nim = {
   get reflRT() { return reflRT; },
   get shadowRT() { return shadowRT; },
   get fade() { return fade; },
+  // frame-by-frame inspection: freeze the simulation, step it by hand, look from anywhere
+  pause(on = true) { paused = on; },
+  advance(sec, dt = 1 / 60) { for (let t = 0; t < sec - 1e-6; t += dt) step(dt); render(); },
+  view(px, py, pz, tx, ty, tz) {
+    orbit.target.set(tx, ty, tz);
+    const d = new THREE.Vector3(px - tx, py - ty, pz - tz);
+    orbit.dist = d.length();
+    orbit.yaw = Math.atan2(d.x, d.z);
+    orbit.pitch = Math.asin(clamp(d.y / orbit.dist, -1, 1));
+    orbit.on = true;
+    applyOrbit();
+    render();
+  },
+  shot() { orbit.on = false; resize(); render(); },
 };

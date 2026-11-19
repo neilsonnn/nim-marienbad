@@ -1,7 +1,7 @@
 // Bodies, arms and hands: everything that moves procedurally.
 import * as THREE from 'three';
-import { HandRig, POSES, CONTACT_POINTS, lerpPose, POSE_SIZE, B_PALM, FINGER_BONES, THUMB_BONES } from './handModel.js';
-import { Sleeve, torsoGeometry, headGeometry, collarGeometry, cuffGeometry, cufflinkGeometry, SHOULDER_L, NECK_PIVOT } from './bodyModel.js';
+import { HandRig, POSES, CONTACT_POINTS, lerpPose, POSE_SIZE, B_PALM, FINGERS, FINGER_BONES, THUMB_BONES } from './handModel.js';
+import { Sleeve, torsoGeometry, headGeometry, collarGeometry, cuffGeometry, SHOULDER_L, NECK_PIVOT, ARM_REST, STUMP } from './bodyModel.js';
 import { clamp, lerp, smoothstep, minJerk, noise1, fnoise, Spring, DEG, quatFromYZ, rand } from './util.js';
 import { TABLE_Y, TABLE_R, L_NO_MIRROR, L_MAIN_ONLY, L_NO_SHADOW } from './world.js';
 // (REACH_SOFT / REACH_MAX defined below with the solver)
@@ -101,9 +101,6 @@ class Arm {
     this.cuff = new THREE.Mesh(cuffGeometry(), mats.shirt);
     this.cuff.matrixAutoUpdate = false;
     actor.scene.add(this.cuff);
-    this.link = new THREE.Mesh(cufflinkGeometry(), mats.metal);
-    this.link.matrixAutoUpdate = false;
-    actor.scene.add(this.link);
     this.S = new THREE.Vector3();
     this.E = new THREE.Vector3();
     this.W = new THREE.Vector3();
@@ -225,7 +222,15 @@ class Arm {
         const dev = Math.acos(clamp(c.dot(pole), -1, 1));
         // (elbows hang: one pointing up above the shoulder line costs extra)
         const up = Math.max(0, c.y - 0.1);
-        const cost = this._penetration(dir, a, h, u, w, ang) * 4000 + dev * dev * (0.12 + 0.5 * (1 - extended)) + ang * ang * 0.08 + up * up * 3.0;
+        // and the forearm lined up with the hand, so the wrist bends no more than it must
+        let wristCost = 0;
+        if (this.handY) {
+          const ex = dir.x * a + h * c.x, ey = dir.y * a + h * c.y, ez = dir.z * a + h * c.z;
+          const fx = this.W.x - this.S.x - ex, fy = this.W.y - this.S.y - ey, fz = this.W.z - this.S.z - ez;
+          const al = 1 - (fx * this.handY.x + fy * this.handY.y + fz * this.handY.z) / Math.max(Math.hypot(fx, fy, fz), 1e-6);
+          wristCost = al * al * 1.6;
+        }
+        const cost = this._penetration(dir, a, h, u, w, ang) * 4000 + dev * dev * (0.12 + 0.5 * (1 - extended)) + ang * ang * 0.08 + up * up * 3.0 + wristCost;
         if (cost < bc) { bc = cost; best.copy(c); }
       }
       // ease toward it (time-based, never instantaneous) with a cap on angular speed
@@ -256,21 +261,38 @@ class Arm {
   }
   updateMeshes(bend = 0) {
     const refUp = _v1.set(0, 0, 1).applyQuaternion(this.foreQuat);
-    this.sleeve.build(this.S, this.E, this.W, refUp, { endBack: 0.040, rWrist: 0.0405 });
-    // cuff sits just behind the wrist joint, a cufflink on the outer side. A bent wrist
-    // pushes it back up the forearm, so the back of the hand never cuts into its edge.
+    // cuff: a centimetre up the forearm from the wrist joint; a bent wrist pushes it
+    // further back, so the hand never cuts into its edge
+    const push = 0.010 + 0.012 * smoothstep(0.5, 1.2, bend);
+    // the sleeve grows out of the jacket's shoulder stump (turned with the arm, see
+    // shoulderRotation) and ends ~2.5 cm short of the cuff's edge, its opening turned
+    // and flattened to sit just around the cuff (the cuff is ~7 cm wide, ~5.4 cm deep)
+    const endX = _v3.set(1, 0, 0).applyQuaternion(this.foreQuat);
+    this.sleeve.build(this.S, this.E, this.W, refUp, { start: STUMP.sleeveStart, rShoulder: STUMP.r + 0.0015, endBack: push + 0.026, rWrist: 0.0368, endX, endFlat: 0.80 });
     _m1.compose(this.W, this.foreQuat, ONE);
-    const outward = this.actor.handOuterSign(this);
-    // the cuff's seam and link face the outside of the wrist
+    // the cuff's seam faces the outside of the wrist
     _q1.copy(this.foreQuat);
-    if (outward < 0) _q1.multiply(_qFlip);
-    const push = 0.0018 + 0.010 * smoothstep(0.7, 1.55, bend);
+    if (this.actor.handOuterSign(this) < 0) _q1.multiply(_qFlip);
     _v2.set(0, -push, 0).applyMatrix4(_m1);
     this.cuff.matrix.compose(_v2, _q1, ONE);
     this.cuff.matrixWorldNeedsUpdate = true;
-    _v2.set(outward * 0.0356, -0.021 - push, 0.0).applyMatrix4(_m1);
-    this.link.matrix.compose(_v2, _q1, ONE);
-    this.link.matrixWorldNeedsUpdate = true;
+  }
+  // The jacket's shoulder cap turns with the upper arm: the rotation (in torso space) from
+  // the arm as the jacket was modelled (ARM_REST) to the arm now, as axis & angle.
+  shoulderRotation(outRot, outS0, outS1) {
+    const a = this.actor;
+    const inv = _q2.copy(a.torsoQuat).invert();
+    const u = _v1.subVectors(this.E, this.S).normalize().applyQuaternion(inv);
+    const r = _v2.set(ARM_REST.x * this.s, ARM_REST.y, ARM_REST.z);
+    _q1.setFromUnitVectors(r, u);
+    const ang = 2 * Math.acos(clamp(_q1.w, -1, 1));
+    const sh = Math.sqrt(Math.max(1 - _q1.w * _q1.w, 0));
+    if (sh < 1e-6) outRot.set(1, 0, 0, 0);
+    else outRot.set(_q1.x / sh, _q1.y / sh, _q1.z / sh, ang);
+    // the joint where the jacket was modelled (the arm's part of it doesn't breathe; the
+    // joint's own rise with each breath is in shoulderLocal)
+    outS0.set(SHOULDER_L.x * this.s, SHOULDER_L.y, SHOULDER_L.z);
+    this.shoulderLocal(outS1);
   }
 }
 const ONE = new THREE.Vector3(1, 1, 1);
@@ -296,6 +318,44 @@ export function tcpLocal(side, pose) {
   return v;
 }
 
+// the middle fingertip (end of its distal bone) in the hand's frame, and its radius:
+// where a sweeping hand touches the stone
+const tipCache = new Map();
+export function tipLocal(side, pose) {
+  const key = side + ':' + Array.from(pose).map((x) => x.toFixed(1)).join(',');
+  let v = tipCache.get(key);
+  if (!v) {
+    const r = probe(side);
+    r.applyPose(pose, new THREE.Quaternion());
+    r.group.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(r.group.matrixWorld).invert();
+    const p = new THREE.Vector3(0, FINGERS[1].len[2], 0).applyMatrix4(r.bones[FINGER_BONES[1][2]].matrixWorld).applyMatrix4(inv);
+    v = { p, r: FINGERS[1].rad[3] };
+    tipCache.set(key, v);
+  }
+  return v;
+}
+
+// the hand's contact spheres in its own frame for a pose (planning where it meets the stone)
+const ptsCache = new Map();
+export function handPoints(side, pose) {
+  const key = side + ':' + Array.from(pose).map((x) => x.toFixed(1)).join(',');
+  let v = ptsCache.get(key);
+  if (!v) {
+    const r = probe(side);
+    r.applyPose(pose, new THREE.Quaternion());
+    r.group.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(r.group.matrixWorld).invert();
+    v = CONTACT_POINTS.map((c) => {
+      const p = c.p.clone();
+      if (c.bone === B_PALM) p.x *= r.sign;
+      return { p: p.applyMatrix4(r.bones[c.bone].matrixWorld).applyMatrix4(inv), r: c.r };
+    });
+    ptsCache.set(key, v);
+  }
+  return v;
+}
+
 // a point at fraction k (0..1) of arc length along a centripetal-ish Catmull-Rom path
 const _c0 = new THREE.Vector3(), _c3 = new THREE.Vector3();
 function pathPoint(path, k, out) {
@@ -314,6 +374,16 @@ function pathPoint(path, k, out) {
     out[ax] = 0.5 * (2 * p1[ax] + (-p0[ax] + p2[ax]) * t + (2 * p0[ax] - 5 * p1[ax] + 4 * p2[ax] - p3[ax]) * t2 + (-p0[ax] + 3 * p1[ax] - 3 * p2[ax] + p3[ax]) * t3);
   }
   return out;
+}
+
+// the point at fraction k of a densely sampled path's true length
+function densePoint(dense, k, out) {
+  const { pts, cum } = dense;
+  const d = clamp(k, 0, 1) * cum[cum.length - 1];
+  let lo = 0, hi = cum.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (cum[m] < d) lo = m; else hi = m; }
+  const t = (d - cum[lo]) / Math.max(cum[hi] - cum[lo], 1e-9);
+  return out.lerpVectors(pts[lo], pts[hi], clamp(t, 0, 1));
 }
 
 export class HandController {
@@ -346,6 +416,9 @@ export class HandController {
     this.onTap = null;
     this._W = new THREE.Vector3();
     this.brace = false; // weight-bearing: locked to the stone, no tremor or fidget
+    // a braced hand's fingers bend at the knuckle until each pad rests on the stone
+    this.settle = new Float32Array(4);
+    this.settleW = 0;
     this._dt = 0;
     this.wristBend = 0; // angle between forearm and hand (diagnostics, cuff)
     // body plan for the current move: lean & reach demand eased in step with the hand
@@ -395,8 +468,15 @@ export class HandController {
       const pts = [from, ...o.via.map((v) => v.clone()), to];
       const cum = [0];
       for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
-      dist = cum[cum.length - 1];
       path = { pts, cum };
+      // the spline sampled densely and measured along its true length, so the hand moves at
+      // the speed the timing asks for everywhere (timed by the chords between points, it
+      // dawdled through tight turns and then shot away from them)
+      const N = 160, dp = [], dc = [0];
+      for (let i = 0; i <= N; i++) dp.push(pathPoint(path, i / N, new THREE.Vector3()));
+      for (let i = 1; i <= N; i++) dc.push(dc[i - 1] + dp[i].distanceTo(dp[i - 1]));
+      path.dense = { pts: dp, cum: dc };
+      dist = dc[N];
     }
     const dur = o.dur ?? clamp(0.28 + dist * 1.25, 0.25, path ? 1.5 : 1.1) * (o.speed ?? 1);
     this.seg = {
@@ -407,11 +487,14 @@ export class HandController {
       path,
       fromQ: this.quat.clone(),
       toQ: quat,
+      // optional orientation held up to the first via point, turning only after it
+      viaQ: o.viaQuat && path ? o.viaQuat.clone() : null,
       fromPose: new Float32Array(this.basePose),
       toPose: new Float32Array(pose),
       arc: o.arc ?? (path ? 0 : Math.min(0.04, dist * 0.3)),
       poseWin: o.poseWin ?? [0.15, 0.85],
       plant: o.plant ?? 0,
+      ease: o.ease || minJerk, // progress along the path for a fraction of the time
       onUpdate: o.onUpdate,
       resolve: o.resolve,
       lateral: path ? 0 : (rand() - 0.5) * dist * 0.08,
@@ -441,7 +524,7 @@ export class HandController {
     const ap = approachDir.clone().setY(0).normalize();
     if (fwd.dot(ap) < 0) fwd.negate();
     // allow the hand to come in partly along the natural reach direction
-    fwd.lerp(ap, 0.35).normalize();
+    fwd.lerp(ap, 0.55).normalize();
     const aW = new THREE.Vector3().crossVectors(UP, fwd).normalize();
     const build = (aw) => {
       const F = fwd.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(UP, -Math.sin(pitch));
@@ -470,6 +553,10 @@ export class HandController {
     const q = inv.clone().multiply(match.quat);
     return { p, q };
   }
+  // where the middle fingertip is now (world)
+  fingertip(out) {
+    return out.set(0, FINGERS[1].len[2], 0).applyMatrix4(this.rig.bones[FINGER_BONES[1][2]].matrixWorld);
+  }
   // world transform of a held match
   heldWorld(h, outP, outQ) {
     outP.copy(h.relP).applyQuaternion(this.quat).add(this.displayWrist);
@@ -494,8 +581,8 @@ export class HandController {
       const s = this.seg;
       s.t += dt;
       const tau = clamp(s.t / s.dur, 0, 1);
-      const k = minJerk(tau);
-      if (s.path) pathPoint(s.path, k, this.wrist);
+      const k = s.ease(tau);
+      if (s.path) densePoint(s.path.dense, k, this.wrist);
       else this.wrist.lerpVectors(s.from, s.to, k);
       const bell = Math.sin(Math.PI * k);
       this.wrist.y += s.arc * bell;
@@ -505,7 +592,11 @@ export class HandController {
         this.wrist.x += -_v1.z * s.lateral * bell;
         this.wrist.z += _v1.x * s.lateral * bell;
       }
-      this.quat.slerpQuaternions(s.fromQ, s.toQ, minJerk(clamp(tau * 1.18, 0, 1)));
+      if (s.viaQ) {
+        const kv = s.path.cum[1] / s.path.cum[s.path.cum.length - 1];
+        if (k < kv) this.quat.slerpQuaternions(s.fromQ, s.viaQ, smoothstep(0, 1, k / Math.max(kv * 0.5, 1e-3)));
+        else this.quat.slerpQuaternions(s.viaQ, s.toQ, smoothstep(0, 1, (k - kv) / Math.max(1 - kv, 1e-3)));
+      } else this.quat.slerpQuaternions(s.fromQ, s.toQ, minJerk(clamp(tau * 1.18, 0, 1)));
       const pk = smoothstep(s.poseWin[0], s.poseWin[1], tau);
       lerpPose(s.fromPose, s.toPose, pk, this.basePose);
       airborne = bell;
@@ -533,6 +624,12 @@ export class HandController {
     this.fidget[19] = fnoise(tn * 0.21 + 4, 2) * 3 * fid;
     if (this.idle && !this.seg) this.idle(dt, this.fidget);
     for (let i = 0; i < POSE_SIZE; i++) this.pose[i] = this.basePose[i] + this.fidget[i];
+    if (this.settleW > 1e-3) {
+      for (let f = 0; f < 4; f++) {
+        this.pose[f * 4] += this.settle[f] * this.settleW * 0.7;
+        this.pose[f * 4 + 1] += this.settle[f] * this.settleW * 0.3;
+      }
+    }
 
     // ---- tremor & breathing coupling
     const trem = this.brace && !this.seg ? 0 : 0.00035 * (0.25 + airborne) * (1 - this.planted * 0.85);
@@ -560,6 +657,10 @@ export class HandController {
     }
     this.displayWrist.copy(this.arm.W);
     this.lift = pen;
+    if (this.brace) {
+      this.settleW += ((this.seg ? 0 : this.planted) - this.settleW) * Math.min(1, dt * 4);
+      this._settleFingers();
+    }
     if (this.lapRest && this.rig.mesh) {
       const below = this.displayWrist.y < TABLE_Y - 0.04;
       if (below !== this._below) {
@@ -602,6 +703,7 @@ export class HandController {
 
   _pose(W, second = false) {
     const arm = this.arm;
+    arm.handY = (arm._hy || (arm._hy = new THREE.Vector3())).set(0, 1, 0).applyQuaternion(this.quat);
     arm.solve(W, second ? 0 : this._dt);
     const D = _v2.set(0, 0, 1).applyQuaternion(this.quat);
     const fq = arm.forearmFrame(D);
@@ -611,6 +713,24 @@ export class HandController {
     _q2.copy(fq).invert().multiply(this.quat);
     this.rig.applyPose(this.pose, _q2);
     g.updateMatrixWorld(true);
+  }
+
+  // Each finger's lowest point (pad or tip) against the stone; bend its knuckle a little
+  // toward closing the gap. Integrated frame to frame, it settles with every pad resting
+  // just above the contact limit, so it never lifts the hand.
+  _settleFingers() {
+    const B = this.rig.bones;
+    for (let f = 0; f < 4; f++) {
+      const F = FINGERS[f], ids = FINGER_BONES[f];
+      let gap = Infinity;
+      for (const [k, t, r] of [[1, 1.0, F.rad[2]], [2, 0.5, (F.rad[2] + F.rad[3]) * 0.5], [2, 1.0, F.rad[3]]]) {
+        _v1.set(0, F.len[k] * t, 0).applyMatrix4(B[ids[k]].matrixWorld);
+        gap = Math.min(gap, _v1.y - r * 0.96 - TABLE_Y);
+      }
+      _v2.setFromMatrixPosition(B[ids[0]].matrixWorld);
+      const L = Math.max(0.03, _v1.distanceTo(_v2));
+      this.settle[f] = clamp(this.settle[f] + (clamp(gap / L, -0.15, 0.15) / DEG) * 0.5, -10, 28);
+    }
   }
 
   _penetration() {
@@ -742,7 +862,7 @@ export class Actor {
   }
 
   handOuterSign(arm) {
-    // cufflink sits on the thumb side of the cuff
+    // the cuff's seam sits on the thumb side
     return arm.side === 'left' ? 1 : -1;
   }
 
@@ -905,6 +1025,10 @@ export class Actor {
         arm.updateMeshes();
       }
     }
+    // ---- the jacket's shoulders follow the upper arms
+    const U = this.clothMat.uniforms;
+    this.arms.left.shoulderRotation(U.uShRot.value[0], U.uShS0.value[0], U.uShS1.value[0]);
+    this.arms.right.shoulderRotation(U.uShRot.value[1], U.uShS0.value[1], U.uShS1.value[1]);
   }
 
   headPosition(out = new THREE.Vector3()) {

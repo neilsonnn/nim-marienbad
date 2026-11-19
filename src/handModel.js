@@ -17,7 +17,7 @@ export const THUMB = {
   cmc: v(-0.0205, 0.020, -0.011),
   dirs: [v(-0.746, 0.617, -0.249), v(-0.553, 0.804, -0.221), v(-0.45, 0.87, -0.20)],
   len: [0.046, 0.032, 0.028],
-  rad: [0.0150, 0.0112, 0.0099, 0.0086],
+  rad: [0.0138, 0.0111, 0.0099, 0.0086],
   nail: v(-0.7, 0.0, 0.7),
 };
 
@@ -31,6 +31,29 @@ for (const f of FINGERS) {
 THUMB.dirs.forEach((d) => d.normalize());
 THUMB.joints = [THUMB.cmc.clone()];
 for (let i = 0; i < 3; i++) THUMB.joints.push(THUMB.joints[i].clone().addScaledVector(THUMB.dirs[i], THUMB.len[i]));
+
+// First web space: the sheet of skin and muscle between thumb and index. Its root sits
+// inside the base of the hand; its free edge curves (concave, like the real fold) from
+// the thumb's knuckle to the index knuckle. Without it the thumb reads as a tube stuck
+// onto the side of the palm.
+const WEB = (() => {
+  const J = THUMB.joints;
+  const apex = v(-0.022, 0.030, -0.007);
+  const e0 = J[1].clone().addScaledVector(THUMB.dirs[1], 0.006);
+  const e1 = FINGERS[0].mcp.clone().add(v(-0.0072, -0.006, -0.0025));
+  const mid = e0.clone().add(e1).multiplyScalar(0.5);
+  const ctrl = mid.clone().lerp(apex, 0.34);
+  const edge = [];
+  const N = 10;
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1);
+    edge.push(e0.clone().multiplyScalar((1 - t) * (1 - t)).addScaledVector(ctrl, 2 * (1 - t) * t).addScaledVector(e1, t * t));
+  }
+  const c = apex.clone().add(e0).add(e1).multiplyScalar(1 / 3);
+  let r = 0;
+  for (const p of [apex, ...edge]) r = Math.max(r, c.distanceTo(p));
+  return { apex, edge, c, r2: (r + 0.022) ** 2 };
+})();
 
 function frameQuat(y, zHint) {
   const Y = y.clone().normalize();
@@ -87,13 +110,16 @@ export function handSDF(x, y, z) {
   fore = Math.max(fore, -(y + 0.115));
   let d = fore;
 
-  // palm slab + metacarpals + thenar / hypothenar eminences
-  let palm = sdRoundBox(x + 0.0005, y - 0.050, z + 0.0040, 0.0272, 0.034, 0.0058, 0.0098);
+  // palm slab + metacarpals + thenar / hypothenar eminences. The heel of the hand narrows
+  // toward the wrist (~6 cm wide there, ~7.5 at the knuckles), so the hand widens out of
+  // the wrist gradually instead of jutting out sideways just below the cuff.
+  const kw = 0.80 + 0.20 * smoothstep(0.004, 0.05, y), xw = x / kw;
+  let palm = sdRoundBox(xw + 0.0005, y - 0.050, z + 0.0040, 0.0272, 0.034, 0.0058, 0.0098) * kw;
   for (const f of FINGERS) {
     palm = smin(palm, sdRoundCone(x, y, z, f.meta.x, f.meta.y, f.meta.z + 0.001, f.mcp.x, f.mcp.y, f.mcp.z + 0.0015, f.mr * 1.04, f.rad[0] * 1.1), 0.010);
   }
-  palm = smin(palm, sdEllipsoid(x, y, z, -0.021, 0.034, -0.0125, 0.0165, 0.025, 0.0125), 0.012);
-  palm = smin(palm, sdEllipsoid(x, y, z, 0.0235, 0.040, -0.0095, 0.0115, 0.031, 0.0105), 0.010);
+  palm = smin(palm, sdEllipsoid(xw, y, z, -0.021, 0.034, -0.0125, 0.0165, 0.025, 0.0125) * kw, 0.012);
+  palm = smin(palm, sdEllipsoid(xw, y, z, 0.0235, 0.040, -0.0095, 0.0115, 0.031, 0.0105) * kw, 0.010);
   d = smin(d, palm, 0.022);
 
   // fingers
@@ -110,15 +136,27 @@ export function handSDF(x, y, z) {
     fd = Math.min(fd, sdEllipsoid(x, y, z, J[0].x, J[0].y - 0.002, J[0].z + 0.0025, R[0] * 1.02, R[0] * 1.1, R[0] * 0.95));
     d = smin(d, fd, 0.0062);
   }
-  // thumb
+  // thumb: the metacarpal is buried in the thenar mass (a wide blend), the phalanges
+  // join with tighter ones so the knuckles still read
   {
     const bd = Math.sqrt(segDist2(x, y, z, thumbBound.a.x, thumbBound.a.y, thumbBound.a.z, thumbBound.b.x, thumbBound.b.y, thumbBound.b.z)) - thumbBound.r;
     if (bd < 0.004) {
       const J = THUMB.joints, R = THUMB.rad;
-      let td = sdRoundCone(x, y, z, J[0].x, J[0].y, J[0].z, J[1].x, J[1].y, J[1].z, R[0], R[1]);
-      td = Math.min(td, sdRoundCone(x, y, z, J[1].x, J[1].y, J[1].z, J[2].x, J[2].y, J[2].z, R[1], R[2]));
-      td = Math.min(td, sdRoundCone(x, y, z, J[2].x, J[2].y, J[2].z, J[3].x, J[3].y, J[3].z, R[2], R[3]));
-      d = smin(d, td, 0.011);
+      const mc = sdRoundCone(x, y, z, J[0].x, J[0].y, J[0].z, J[1].x, J[1].y, J[1].z, R[0], R[1]);
+      let td = sdRoundCone(x, y, z, J[1].x, J[1].y, J[1].z, J[2].x, J[2].y, J[2].z, R[1], R[2]);
+      td = smin(td, sdRoundCone(x, y, z, J[2].x, J[2].y, J[2].z, J[3].x, J[3].y, J[3].z, R[2], R[3]), 0.003);
+      d = smin(d, mc, 0.016);
+      d = smin(d, td, 0.009);
+    }
+  }
+  // first web space: a fan of tapering cones from a thick root to a thin, concave edge
+  {
+    const dx = x - WEB.c.x, dy = y - WEB.c.y, dz = z - WEB.c.z;
+    if (dx * dx + dy * dy + dz * dz < WEB.r2) {
+      const A = WEB.apex;
+      let wd = Infinity;
+      for (const e of WEB.edge) wd = smin(wd, sdRoundCone(x, y, z, A.x, A.y, A.z, e.x, e.y, e.z, 0.0090, 0.0043), 0.003);
+      d = smin(d, wd, 0.008);
     }
   }
   return d;
@@ -153,30 +191,92 @@ function buildRightGeometry() {
   for (let j = 1; j < 3; j++) joints.push({ p: THUMB.joints[j], axis: THUMB.dirs[j], r: THUMB.rad[j] * 1.45 });
 
   const P = new THREE.Vector3(), N = new THREE.Vector3(), q = new THREE.Vector3();
-  const logw = new Float64Array(BONES.length);
+  // Skin weights. Each vertex belongs (softly) to its nearest limb: a finger, the thumb, or
+  // the palm & forearm. Within a limb it blends between neighbouring bones only in a band
+  // around each joint, measured along the limb, so a finger folds at its knuckles and the
+  // skin between them moves rigidly with its own phalanx. (Plain distance-to-bone weights
+  // let the wide palm claim the first phalanx, which twisted every curled finger.)
+  const bw = new Float64Array(BONES.length);
+  // forearm share of the palm/wrist: the bend starts just past the cuff's edge, so the
+  // skin inside the cuff stays with the forearm and a bent wrist never pushes through it
+  const wFore = (y) => 1 - smoothstep(-0.006, 0.02, y);
+  const addPalm = (w, y) => { bw[B_FOREARM] += w * wFore(y); bw[B_PALM] += w * (1 - wFore(y)); };
+  const fingerLimb = FINGERS.map((f, fi) => {
+    const L = f.len;
+    return { f, ids: FINGER_BONES[fi], cuts: [0.0015, L[0], L[0] + L[1]], h: [0.0062, f.rad[1] * 0.55, f.rad[2] * 0.55] };
+  });
+  const TJ = THUMB.joints;
+  const tCum = [0, THUMB.len[0], THUMB.len[0] + THUMB.len[1], THUMB.len[0] + THUMB.len[1] + THUMB.len[2]];
+  const coneDist = (px, py, pz, a, b, ra, rb) => {
+    const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+    const t = clamp(((px - a.x) * abx + (py - a.y) * aby + (pz - a.z) * abz) / (abx * abx + aby * aby + abz * abz), 0, 1);
+    const dx = px - a.x - abx * t, dy = py - a.y - aby * t, dz = pz - a.z - abz * t;
+    return { d: Math.sqrt(dx * dx + dy * dy + dz * dz) - (ra + (rb - ra) * t), t };
+  };
   for (let i = 0; i < n; i++) {
     P.fromArray(positions, i * 3);
     N.fromArray(normals, i * 3);
-    let best = -Infinity, bestB = 0;
-    for (let b = 0; b < BONES.length; b++) {
-      let d2 = Infinity;
-      for (const [a, c] of BONES[b].segs) d2 = Math.min(d2, segDist2(P.x, P.y, P.z, a.x, a.y, a.z, c.x, c.y, c.z));
-      const s = BONES[b].sigma;
-      logw[b] = -d2 / (s * s);
-      if (logw[b] > best) { best = logw[b]; bestB = b; }
+    const { x, y, z } = P;
+    // distance to each limb's surface
+    const limbD = [];
+    for (const L of fingerLimb) {
+      const J = L.f.joints, R = L.f.rad;
+      let d = coneDist(x, y, z, L.f.meta, J[0], L.f.mr, R[0]).d;
+      for (let k = 0; k < 3; k++) d = Math.min(d, coneDist(x, y, z, J[k], J[k + 1], R[k], R[k + 1]).d);
+      limbD.push(d);
     }
-    // top-4
-    const order = Array.from(logw.keys()).sort((a, b) => logw[b] - logw[a]).slice(0, 4);
-    let sum = 0;
-    const w = order.map((b) => {
-      const x = Math.exp(logw[b] - best);
-      sum += x;
-      return x;
+    let td = Infinity, tS = 0;
+    for (let k = 0; k < 3; k++) {
+      const c = coneDist(x, y, z, TJ[k], TJ[k + 1], THUMB.rad[k], THUMB.rad[k + 1]);
+      if (c.d < td) { td = c.d; tS = tCum[k] + c.t * THUMB.len[k]; }
+    }
+    limbD.push(td);
+    const palmD = Math.min(
+      sdRoundBox(x + 0.0005, y - 0.050, z + 0.0040, 0.0272, 0.034, 0.0058, 0.0098),
+      Math.max(Math.hypot(x / 0.0265, (z + 0.002) / 0.0185) - 1, 0) * 0.0185 + Math.max(0, y - 0.02),
+    );
+    limbD.push(palmD);
+    let dmin = Infinity;
+    for (const d of limbD) dmin = Math.min(dmin, d);
+    bw.fill(0);
+    let lsum = 0;
+    const lw = limbD.map((d) => { const w = Math.exp(-(((d - dmin) / 0.0032) ** 2)); lsum += w; return w; });
+    // fingers: palm | proximal | middle | distal by position along the finger
+    fingerLimb.forEach((L, fi) => {
+      const w = lw[fi] / lsum;
+      if (w < 1e-4) return;
+      const sAx = q.copy(P).sub(L.f.mcp).dot(L.f.dir);
+      const a = smoothstep(L.cuts[0] - L.h[0], L.cuts[0] + L.h[0], sAx);
+      const b = smoothstep(L.cuts[1] - L.h[1], L.cuts[1] + L.h[1], sAx);
+      const c = smoothstep(L.cuts[2] - L.h[2], L.cuts[2] + L.h[2], sAx);
+      addPalm(w * (1 - a), y);
+      bw[L.ids[0]] += w * a * (1 - b);
+      bw[L.ids[1]] += w * a * b * (1 - c);
+      bw[L.ids[2]] += w * a * b * c;
     });
+    // thumb: buried in the thenar mass at its base, then its two joints
+    {
+      const w = lw[4] / lsum;
+      if (w >= 1e-4) {
+        const a = smoothstep(-0.004, 0.016, tS);
+        const b = smoothstep(tCum[1] - 0.006, tCum[1] + 0.006, tS);
+        const c = smoothstep(tCum[2] - 0.0045, tCum[2] + 0.0045, tS);
+        addPalm(w * (1 - a), y);
+        bw[THUMB_BONES[0]] += w * a * (1 - b);
+        bw[THUMB_BONES[1]] += w * a * b * (1 - c);
+        bw[THUMB_BONES[2]] += w * a * b * c;
+      }
+    }
+    addPalm(lw[5] / lsum, y);
+    // top-4
+    const order = Array.from(bw.keys()).sort((a, b) => bw[b] - bw[a]).slice(0, 4);
+    let sum = 0;
+    for (const b of order) sum += bw[b];
     for (let k = 0; k < 4; k++) {
       skinIndex[i * 4 + k] = order[k];
-      skinWeight[i * 4 + k] = w[k] / sum;
+      skinWeight[i * 4 + k] = bw[order[k]] / sum;
     }
+    let bestB = order[0];
 
     // nail mask
     let nail = 0;
@@ -200,13 +300,18 @@ function buildRightGeometry() {
       if (Math.abs(ax) < jBest) { jBest = Math.abs(ax); jAx = ax; }
     }
     const dorsal = N.dot(boneAxes[bestB].Z);
-    let thick = 2.5;
-    if (bestB >= 2) {
-      const fi = FINGER_BONES.findIndex((ids) => ids.includes(bestB));
-      thick = fi >= 0 ? FINGERS[fi].rad[1] / 0.01 : THUMB.rad[1] / 0.01;
+    // translucency thickness, blended with the skin weights (no patches where they switch)
+    let thick = 0;
+    for (let k = 0; k < 4; k++) {
+      const b = order[k];
+      const fi = FINGER_BONES.findIndex((ids) => ids.includes(b));
+      const tb = fi >= 0 ? FINGERS[fi].rad[1] / 0.01 : THUMB_BONES.includes(b) ? THUMB.rad[1] / 0.01 : 2.5;
+      thick += tb * skinWeight[i * 4 + k];
     }
     aux[i * 4] = nail;
-    aux[i * 4 + 1] = clamp(jAx, -1, 1);
+    // (unsigned: the signed distance flips halfway between two joints, and interpolated
+    // across a triangle it passed through zero, drawing a false crease mid-finger)
+    aux[i * 4 + 1] = Math.min(Math.abs(jAx), 1);
     aux[i * 4 + 2] = dorsal;
     aux[i * 4 + 3] = thick;
   }
@@ -270,6 +375,12 @@ export const POSES = {
   hold: null,
   release: null,
   tapUp: null,
+  // sweeping a row: fingers together, gently cupped, the thumb alongside
+  sweep: pose([[18, 20, 8, -2], [18, 22, 10, 0], [20, 24, 12, 1], [22, 26, 14, 3]], [10, 0, 0, 10, 12]),
+  // holding the matchbox by its sleeve: fingers wrapped round the far side, thumb opposite
+  boxGrip: pose([[34, 40, 18, 1], [40, 44, 20, 0], [46, 48, 22, -1], [56, 58, 28, -2]], [20, -10, 0, 15, 12]),
+  // raking a row in: middle, ring and little fingers hooked onto the stone, the index lifted
+  rake: pose([[-6, 18, 10, 2], [24, 62, 40, 0], [28, 66, 42, -1], [30, 66, 42, -2]], [10, 0, 0, 10, 12]),
 };
 
 // ---------------------------------------------------------------------------
@@ -486,6 +597,48 @@ function restObjective(bone, local, faceDir = null) {
     return c;
   };
 }
+// The palmar surface the hand rests on when laid flat (bind space z of its lowest point:
+// the thenar and hypothenar pads and the heel).
+let _palmFloor = null;
+export function palmarSurfaceZ(x, y) {
+  let z = 0.0;
+  for (let i = 0; i < 120 && handSDF(x, y, z) <= 0; i++) z -= 0.00025;
+  return z;
+}
+function palmFloor() {
+  if (_palmFloor !== null) return _palmFloor;
+  let lo = 0;
+  for (let x = -0.03; x <= 0.03; x += 0.004)
+    for (let y = 0.0; y <= 0.08; y += 0.004) lo = Math.min(lo, palmarSurfaceZ(x, y));
+  return (_palmFloor = lo);
+}
+// Thumb lying on the stone beside a palm pressed flat: splayed `ang` degrees from the
+// hand's axis with its pad down on the same plane as the palm, its nail turned up and a
+// little outward, joints nearly straight (a pressed thumb does not curl), nothing of it
+// below the stone.
+function flatThumbObjective(ang, reach) {
+  const floor = palmFloor();
+  const goal = new THREE.Vector3(THUMB.cmc.x - Math.sin(ang * DEG) * reach, THUMB.cmc.y + Math.cos(ang * DEG) * reach, floor + THUMB.rad[3] * 0.5);
+  const nailGoal = new THREE.Vector3(-0.5, 0, 0.87).normalize();
+  const t = new THREE.Vector3(), nz = new THREE.Vector3(), a = new THREE.Vector3(), b = new THREE.Vector3();
+  return (rig, p) => {
+    thumbPad(rig, t);
+    let c = t.distanceToSquared(goal) * 1e6;
+    nz.set(0, 0, 1).transformDirection(rig.bones[THUMB_BONES[2]].matrixWorld);
+    c += (1 - nz.dot(nailGoal)) * 4.0;
+    for (let k = 0; k < 3; k++) {
+      boneSeg(rig, THUMB_BONES[k], THUMB.len[k], a, b);
+      for (let i = 0; i <= 3; i++) {
+        const z = a.z + ((b.z - a.z) * i) / 3;
+        const r = THUMB.rad[k] + ((THUMB.rad[k + 1] - THUMB.rad[k]) * i) / 3;
+        const pen = floor - (z - r * 0.92);
+        if (pen > 0) c += pen * pen * 4e6;
+      }
+    }
+    c += ((p[19] - 8) / 18) ** 2 + ((p[20] - 10) / 18) ** 2;
+    return c;
+  };
+}
 function solvePinch(base, gap, start = null) {
   const p = solveThumb(base, pinchObjective(gap), start);
   const rig = new HandRig('right', null);
@@ -504,10 +657,12 @@ export function initPoses() {
   POSES.relaxed = solveThumb(POSES.relaxed, restObjective(I[1], new THREE.Vector3(-(FINGERS[0].rad[1] + 0.009), FINGERS[0].len[1] * 0.4, -0.006)));
   POSES.touch = solveThumb(POSES.touch, restObjective(I[1], new THREE.Vector3(-(FINGERS[0].rad[1] + 0.008), FINGERS[0].len[1] * 0.2, -0.004)));
   POSES.poised = solveThumb(POSES.poised, restObjective(I[0], new THREE.Vector3(-(FINGERS[0].rad[0] + 0.012), FINGERS[0].len[0] * 0.75, -0.010)));
-  // flat / spread: thumb out to the side, pad down
-  POSES.flat = solveThumb(POSES.flat, restObjective(I[0], new THREE.Vector3(-0.05, 0.005, -0.012)));
-  POSES.spread = solveThumb(POSES.spread, restObjective(I[0], new THREE.Vector3(-0.058, -0.004, -0.014)));
-  POSES.brace = solveThumb(POSES.brace, restObjective(I[0], new THREE.Vector3(-0.062, -0.010, -0.016)));
+  POSES.sweep = solveThumb(POSES.sweep, restObjective(I[0], new THREE.Vector3(-(FINGERS[0].rad[0] + 0.010), FINGERS[0].len[0] * 0.7, -0.009)));
+  POSES.rake = solveThumb(POSES.rake, restObjective(I[0], new THREE.Vector3(-(FINGERS[0].rad[0] + 0.010), FINGERS[0].len[0] * 0.6, -0.008)));
+  // flat / spread / brace: thumb lying on the stone with the palm, splayed out to the side
+  POSES.flat = solveThumb(POSES.flat, flatThumbObjective(30, 0.093));
+  POSES.spread = solveThumb(POSES.spread, flatThumbObjective(46, 0.091));
+  POSES.brace = solveThumb(POSES.brace, flatThumbObjective(42, 0.092));
   // pinch family
   const pinch = solvePinch(POSES.pinch, 0.0074);
   POSES.pinch = pinch.pose;
@@ -517,6 +672,8 @@ export function initPoses() {
   POSES.holdWide = solvePinch(POSES.pinch, 0.0140, ts).pose;
   // reach: an opposed open "C", ready to close on a match
   POSES.reach = solvePinch(POSES.reach, 0.036, ts).pose;
+  POSES.boxGrip = solvePinch(POSES.boxGrip, 0.0372, ts).pose;
+  POSES.boxOpen = solvePinch(POSES.boxGrip, 0.046, ts).pose;
   POSES.release = lerpPose(POSES.hold, POSES.reach, 0.8);
   // finger tap (index lifted)
   POSES.tapUp = new Float32Array(POSES.spread);
@@ -544,11 +701,15 @@ export const CONTACT_POINTS = (() => {
     pts.push({ bone: THUMB_BONES[k], p: new THREE.Vector3(0, THUMB.len[k] * 0.5, 0), r: (THUMB.rad[k] + THUMB.rad[k + 1]) * 0.5 });
   }
   pts.push({ bone: THUMB_BONES[2], p: new THREE.Vector3(0, THUMB.len[2], 0), r: THUMB.rad[3] });
-  // palm: knuckle heads & heel (in palm-bone local coords == hand rest coords)
-  for (const F of FINGERS) pts.push({ bone: B_PALM, p: F.mcp.clone(), r: F.rad[0] * 1.05 });
-  pts.push({ bone: B_PALM, p: new THREE.Vector3(0.0, 0.045, -0.006), r: 0.016 });
-  pts.push({ bone: B_PALM, p: new THREE.Vector3(0.020, 0.025, -0.006), r: 0.012 });
-  pts.push({ bone: B_PALM, p: new THREE.Vector3(-0.018, 0.028, -0.008), r: 0.014 });
-  pts.push({ bone: B_PALM, p: new THREE.Vector3(0.0, 0.0, 0.0), r: 0.019 });
+  // palm (in palm-bone local coords == hand rest coords): spheres sitting on the actual
+  // palmar surface, so a hand laid flat touches the stone with its skin, not above or in it
+  const palmPts = [
+    ...FINGERS.map((F) => [F.mcp.x, F.mcp.y - 0.006]),
+    [0.0, 0.048], [0.002, 0.012], [-0.022, 0.032], [0.022, 0.040], [-0.012, 0.072], [0.012, 0.068], [0.0, -0.006],
+  ];
+  for (const [x, y] of palmPts) {
+    const r = 0.010;
+    pts.push({ bone: B_PALM, p: new THREE.Vector3(x, y, palmarSurfaceZ(x, y) + r), r });
+  }
   return pts;
 })();

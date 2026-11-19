@@ -1,6 +1,6 @@
 // Every material in the scene: hand-written shaders on top of glsl.js.
 import * as THREE from 'three';
-import { COMMON, VERT, FRAG_HEAD, FRAG_PROLOGUE } from './glsl.js';
+import { COMMON, NOISE, VERT, FRAG_HEAD, FRAG_PROLOGUE } from './glsl.js';
 
 export const OCC_N = 40;
 
@@ -50,7 +50,7 @@ function make({ frag, vert = VERT, uniforms = {}, defines = {}, side = THREE.Fro
 
 // --------------------------------------------------------------------- skin (hands)
 const SKIN_DETAIL = /* glsl */ `
-// Skin micro-relief: pores, knuckle creases, palmar folds, dorsal veins, nails.
+// Skin micro-relief: pores, knuckle creases, palmar folds, nails.
 float skinHeight(vec3 pl, vec3 pw, float nail, float jAx, float dorsal, float fp, out float nailEdge) {
   float h = 0.0;
   float dmask = smoothstep(0.15, 0.6, dorsal);
@@ -63,11 +63,6 @@ float skinHeight(vec3 pl, vec3 pw, float nail, float jAx, float dorsal, float fp
   // pores & fine texture
   h += (vnoise(pl * 2600.0) - 0.5) * 0.000028 * detail(0.0004, fp) * (1.0 - nail);
   h += (vnoise(pl * 700.0) - 0.5) * 0.00005 * detail(0.0014, fp) * (1.0 - nail);
-  // veins on the back of the hand (bind space)
-  float dz = smoothstep(0.004, 0.012, pl.z) * smoothstep(-0.01, 0.015, pl.y) * (1.0 - smoothstep(0.06, 0.085, pl.y));
-  float vein1 = abs(sin(pl.x * 140.0 + sin(pl.y * 55.0) * 1.3 + 0.6));
-  float vein2 = abs(sin(pl.x * 95.0 - pl.y * 70.0 + sin(pl.y * 41.0)));
-  h += (smoothstep(0.16, 0.0, vein1) * 0.7 + smoothstep(0.12, 0.0, vein2) * 0.5) * 0.00032 * dz * detail(0.004, fp);
   // nail: smooth plate with faint longitudinal ridges, slight step at its border
   h += nail * 0.00018 + nail * (vnoise(vec3(pl.x * 3000.0, pl.y * 120.0, pl.z * 3000.0)) - 0.5) * 0.00001 * detail(0.0005, fp);
   nailEdge = smoothstep(0.25, 0.5, nail) * (1.0 - smoothstep(0.5, 0.9, nail));
@@ -181,7 +176,7 @@ ${FRAG_PROLOGUE}
   vec3 halb = vec3(0.022 + 0.014 * comb * comb2);
   vec3 L; float dist;
   vec3 E = keyLight(vW, L, dist);
-  float sh = E.x > 1e-5 ? shadowPCSS(vW, N, 1.5) : 0.0;
+  float sh = E.x > 1e-5 ? shadowPCSS(vW, N, 1.5, 0.04) : 0.0;
   vec3 hairCol = hairLight(vW, hn, V, T, L, E, sh, shiftN, halb);
   float pool = lightPool(vW);
   hairCol += hairLight(vW, hn, V, T, uFillDir, uFillColor * pool, 1.0, shiftN, halb);
@@ -201,6 +196,8 @@ ${FRAG_PROLOGUE}
 const CLOTH_FRAG = /* glsl */ `
 uniform float uFabric;      // base albedo of the suit
 uniform float uShirtFront;  // 1 for torsos (shirt V, tie, lapels)
+uniform float uSheen;       // wool sheen strength
+uniform float uKeySheen;    // how much of it the hanging lamp raises
 void main() {
 ${FRAG_PROLOGUE}
   vec3 cl = vL;
@@ -241,11 +238,13 @@ ${FRAG_PROLOGUE}
   float slub = fbm3(cl * 40.0);
   s.albedo = vec3(uFabric * (0.85 + 0.3 * slub));
   s.rough = 0.88;
-  s.sheen = 0.55;
+  s.sheen = uSheen;
   s.sheenRough = 0.45;
+  s.keySheen = uKeySheen;
   s.wrap = 0.35;
   s.f0 = 0.03;
   s.shadowSoft = 1.6;
+  s.thick = 0.06;
   s.albedo = mix(s.albedo, vec3(0.70), max(shirt * (1.0 - tie), pocket));
   s.albedo = mix(s.albedo, vec3(0.025), tie);
   s.albedo = mix(s.albedo, vec3(0.012), button);
@@ -257,12 +256,17 @@ ${FRAG_PROLOGUE}
 }`;
 
 export function makeClothMaterial({ torso = false, fabric = 0.038, side = THREE.FrontSide } = {}) {
-  const defines = torso ? { TORSO: 1, BREATH: 1 } : { HAS_AUX3: 1 };
+  const defines = torso ? { TORSO: 1, BREATH: 1, SHOULDERS: 1 } : { HAS_AUX3: 1 };
+  const shoulders = torso ? {
+    uShRot: { value: [new THREE.Vector4(1, 0, 0, 0), new THREE.Vector4(1, 0, 0, 0)] },
+    uShS0: { value: [new THREE.Vector3(), new THREE.Vector3()] },
+    uShS1: { value: [new THREE.Vector3(), new THREE.Vector3()] },
+  } : {};
   return make({
     name: torso ? 'jacket' : 'sleeve',
     defines,
     side,
-    uniforms: { uFabric: { value: fabric }, uShirtFront: { value: 1 }, uBreath: { value: 0 } },
+    uniforms: { uFabric: { value: fabric }, uShirtFront: { value: 1 }, uBreath: { value: 0 }, uSheen: { value: 0.55 }, uKeySheen: { value: 0.25 }, ...shoulders },
     frag: CLOTH_FRAG,
   });
 }
@@ -286,6 +290,7 @@ ${FRAG_PROLOGUE}
   s.sheenRough = 0.5;
   s.wrap = 0.5;
   s.shadowSoft = 1.4;
+  s.thick = 0.035;
   if (!gl_FrontFacing) s.albedo *= 0.55;
   vec3 col = shade(s);
   gl_FragColor = finalColor(col, vW);
@@ -321,6 +326,7 @@ ${FRAG_PROLOGUE}
   s.wrap = mix(0.45, 0.1, head);
   s.trans = 0.25 * (1.0 - head);
   s.shadowSoft = 0.6;
+  s.thick = 0.003;
   // phosphorus glints
   s.spec2 = head * step(0.82, grit) * 2.0;
   vec3 col = shade(s);
@@ -360,6 +366,9 @@ export function makeTableMaterial() {
       uReflScale: { value: 500 },
       uReflGain: { value: 3.6 },
       uOcc: { value: Array.from({ length: OCC_N * 2 }, () => new THREE.Vector4(0, -10, 0, 0)) },
+      uStoneA: { value: null },
+      uStoneB: { value: null },
+      uStoneHalf: { value: STONE_HALF },
     },
     vert: /* glsl */ `
 uniform mat4 uReflMatrix;
@@ -381,6 +390,9 @@ uniform sampler2D uReflTex;
 uniform float uReflScale;
 uniform float uReflGain;
 uniform vec4 uOcc[OCC_N * 2];
+uniform sampler2D uStoneA;   // sqrt(albedo / 0.05), haze, smudge, fine clouding
+uniform sampler2D uStoneB;   // relief slope x, z (±0.03), slab undulation noise
+uniform float uStoneHalf;
 varying vec4 vRefl;
 
 float occlusion(vec3 P) {
@@ -425,26 +437,25 @@ ${FRAG_PROLOGUE}
   float flatTop = smoothstep(0.985, 0.9995, Ng.y);
   vec2 q = vW.xz;
 
-  // ---- polished black granite
-  vec2 warp = vec2(fbm2(q * 3.1 + 1.7), fbm2(q * 3.1 + 9.2));
-  float cloud = fbm2(q * 5.5 + warp * 1.8);
-  float cloud2 = fbm2(q * 17.0 + warp * 0.6 + 4.0);
+  // ---- polished black granite. The smooth fields (domain-warped clouding, calcite
+  // threads, haze, smudges, relief) never change, so they are baked once at startup
+  // (bakeStone); crystals, mica and polishing swirls stay live and sharp.
+  vec2 suv = q / (2.0 * uStoneHalf) + 0.5;
+  vec4 sA = texture2D(uStoneA, suv);
+  vec4 sB = texture2D(uStoneB, suv);
+  float cloud2 = sA.a;
   vec4 cr = crystals(q * 480.0);
   float grain = detail(1.0 / 480.0, fp);
   float crystalTone = (cr.z - 0.5) * grain;
   float boundary = smoothstep(0.10, 0.0, cr.y - cr.x) * grain;
-  // calcite threads drifting through the stone
-  float vf = fbm2(q * 1.6 + warp * 1.2 + 21.0);
-  float vein = smoothstep(0.010, 0.0, abs(vf - 0.53)) * 0.7 + smoothstep(0.005, 0.0, abs(fbm2(q * 3.7 + warp + 7.0) - 0.5)) * 0.35;
-  vein *= smoothstep(0.35, 0.7, fbm2(q * 2.0 + 3.0));
   // mica flakes catching the lamp
   float mica = step(0.955, cr.w) * smoothstep(0.42, 0.05, cr.x) * grain;
-  float alb = 0.0075 + 0.020 * cloud * cloud + 0.005 * cloud2 + 0.007 * crystalTone - 0.003 * boundary + 0.010 * vein + 0.015 * mica;
+  float alb = sA.r * sA.r * 0.05 + 0.007 * crystalTone - 0.003 * boundary + 0.015 * mica;
 
   // ---- the polish: haze, hand-worn smudges, rotary polishing swirls
-  float haze = smoothstep(0.35, 0.85, fbm2(q * 6.5 + 2.0));
+  float haze = sA.g;
   float wear = exp(-pow(length(q - vec2(-0.16, 0.14)) / 0.11, 2.0)) + exp(-pow(length(q - vec2(0.03, -0.29)) / 0.13, 2.0));
-  float smudge = smoothstep(0.62, 0.78, fbm2(q * 24.0 + warp * 3.0)) * (0.3 + wear);
+  float smudge = sA.b * (0.3 + wear);
   vec2 sc = q * 7.0;
   vec2 si = floor(sc);
   vec2 ctr = si + vec2(hash12(si + 2.3), hash12(si + 7.9));
@@ -453,9 +464,10 @@ ${FRAG_PROLOGUE}
   float swirl = smoothstep(0.86, 1.0, abs(sin(sr * 2600.0 + hash12(si) * 40.0))) * swirlMask;
   float rough = 0.036 + 0.075 * haze + 0.035 * wear + 0.05 * smudge + 0.02 * cloud2 + 0.05 * swirl;
 
-  // ---- micro-relief: orange peel of the hand-polished slab + swirl furrows
-  float h = (fbm2(q * 2.7) - 0.5) * 0.0007 + (cloud2 - 0.5) * 0.00004 - swirl * 0.0000025 - boundary * 0.0000015;
+  // ---- micro-relief: orange peel of the hand-polished slab (baked slope) + swirl furrows
+  float h = -swirl * 0.0000025 - boundary * 0.0000015;
   N = bumpNormal(vW, Ng, h);
+  N = normalize(N - vec3(sB.r - 0.5, 0.0, sB.g - 0.5) * 0.06);
   float dist = length(cameraPosition - vW);
   float NoV = max(dot(N, V), 1e-3);
 
@@ -466,7 +478,7 @@ ${FRAG_PROLOGUE}
   // (the far lit strip) into wavering streaks while near hands stay crisp.
   float far = clamp(textureLod(uReflTex, ruv, 3.0).a, 0.0, 2.5);
   vec2 wav = vec2(
-    sin(q.y * 41.0 + sin(q.x * 23.0 + 1.3) * 1.4) * 0.55 + sin(q.y * 97.0 + q.x * 31.0 + 2.1) * 0.25 + (fbm2(q * 9.0 + 3.7) - 0.5) * 0.9,
+    sin(q.y * 41.0 + sin(q.x * 23.0 + 1.3) * 1.4) * 0.55 + sin(q.y * 97.0 + q.x * 31.0 + 2.1) * 0.25 + (sB.b - 0.5) * 0.9,
     sin(q.x * 37.0 + q.y * 13.0 + 0.4) * 0.3);
   ruv += wav * far * 0.0075;
   vec4 r0 = textureLod(uReflTex, ruv, 0.0);
@@ -509,15 +521,81 @@ ${FRAG_PROLOGUE}
   });
 }
 
+// --------------------------------------------------------------------- the stone's static fields, baked once
+// Half-width of the square of stone covered by the bake (the slab plus its bullnose).
+export const STONE_HALF = 0.385;
+const BAKE_FRAG = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform float uHalf;
+uniform float uSize;
+uniform int uOut;
+${NOISE}
+void main() {
+  vec2 q = (vUv * 2.0 - 1.0) * uHalf;
+  vec2 warp = vec2(fbm2(q * 3.1 + 1.7), fbm2(q * 3.1 + 9.2));
+  float cloud = fbm2(q * 5.5 + warp * 1.8);
+  float cloud2 = fbm2(q * 17.0 + warp * 0.6 + 4.0);
+  if (uOut == 0) {
+    // calcite threads drifting through the stone
+    float vf = fbm2(q * 1.6 + warp * 1.2 + 21.0);
+    float vein = smoothstep(0.010, 0.0, abs(vf - 0.53)) * 0.7 + smoothstep(0.005, 0.0, abs(fbm2(q * 3.7 + warp + 7.0) - 0.5)) * 0.35;
+    vein *= smoothstep(0.35, 0.7, fbm2(q * 2.0 + 3.0));
+    float alb = 0.0075 + 0.020 * cloud * cloud + 0.005 * cloud2 + 0.010 * vein;
+    float haze = smoothstep(0.35, 0.85, fbm2(q * 6.5 + 2.0));
+    float smudge = smoothstep(0.62, 0.78, fbm2(q * 24.0 + warp * 3.0));
+    gl_FragColor = vec4(sqrt(clamp(alb / 0.05, 0.0, 1.0)), haze, smudge, cloud2);
+  } else {
+    // slope of the orange-peel relief (world units), from the texel-to-texel change
+    float h = (fbm2(q * 2.7) - 0.5) * 0.0007 + (cloud2 - 0.5) * 0.00004;
+    vec2 g = vec2(dFdx(h), dFdy(h)) * uSize / (2.0 * uHalf);
+    gl_FragColor = vec4(clamp(0.5 + g / 0.06, 0.0, 1.0), fbm2(q * 9.0 + 3.7), 1.0);
+  }
+}`;
+export function bakeStone(renderer, size) {
+  const target = () => {
+    const rt = new THREE.WebGLRenderTarget(size, size, {
+      depthBuffer: false, generateMipmaps: true,
+      minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
+    });
+    rt.texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    return rt;
+  };
+  const a = target(), b = target();
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uHalf: { value: STONE_HALF }, uSize: { value: size }, uOut: { value: 0 } },
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: BAKE_FRAG,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  quad.frustumCulled = false;
+  const scene = new THREE.Scene();
+  scene.add(quad);
+  const cam = new THREE.Camera();
+  const prev = renderer.getRenderTarget();
+  renderer.setRenderTarget(a);
+  renderer.render(scene, cam);
+  mat.uniforms.uOut.value = 1;
+  renderer.setRenderTarget(b);
+  renderer.render(scene, cam);
+  renderer.setRenderTarget(prev);
+  mat.dispose();
+  quad.geometry.dispose();
+  return { a: a.texture, b: b.texture };
+}
+
 // --------------------------------------------------------------------- metals / paper / floor
-export function makeMetalMaterial({ albedo = 0.8, rough = 0.12, aniso = 0 } = {}) {
+export function makeMetalMaterial({ albedo = 0.8, rough = 0.12, aniso = 0, strip = 0 } = {}) {
   return make({
     name: 'metal',
-    uniforms: { uAlb: { value: albedo }, uRough: { value: rough }, uBrush: { value: aniso } },
+    uniforms: { uAlb: { value: albedo }, uRough: { value: rough }, uBrush: { value: aniso }, uStrip: { value: strip } },
     frag: /* glsl */ `
 uniform float uAlb;
 uniform float uRough;
 uniform float uBrush;
+uniform float uStrip;   // a soft lit strip in the room behind the camera (the table's siding)
 void main() {
 ${FRAG_PROLOGUE}
   // circumferential brushing on flat faces, beads left polished
@@ -532,14 +610,22 @@ ${FRAG_PROLOGUE}
   s.rough = uRough + 0.11 * face + 0.03 * vnoise(vW * 200.0) + 0.04 * face * (brush - 0.5);
   s.shadowSoft = 1.0;
   vec3 col = shade(s);
+  if (uStrip > 0.0) {
+    // The convex siding mirrors a wide, softly lit band of the room behind the camera:
+    // a bright line runs along its whole front, as in the shot.
+    vec3 R = reflect(-V, s.N);
+    float strip = exp(-pow((R.y - 0.28) / 0.24, 2.0)) * smoothstep(-0.5, 0.5, R.z) * (0.75 + 0.25 * vnoise(vec3(atan(R.x, R.z) * 6.0, 0.0, 0.0)));
+    col += s.albedo * strip * uStrip * (0.4 + 0.6 * lightPool(vW));
+  }
   gl_FragColor = finalColor(col, vW);
 }`,
   });
 }
 
-export function makePaperMaterial() {
+export function makePaperMaterial({ plain = false } = {}) {
   return make({
-    name: 'matchbox',
+    name: plain ? 'matchtray' : 'matchbox',
+    defines: plain ? { PLAIN: 1 } : {},
     frag: /* glsl */ `
 // Local box: x in [-0.0265,0.0265], y in [-0.0075,0.0075], z in [-0.018,0.018]
 void main() {
@@ -559,6 +645,11 @@ ${FRAG_PROLOGUE}
   // striker: dark, gritty, scuffed
   float grit = vnoise(p * 6000.0);
   float strike = side * step(abs(p.y), 0.0058) * step(abs(p.x), 0.024);
+#ifdef PLAIN
+  // the drawer: plain, slightly greyer board, no print and no striker
+  ink = 0.0;
+  strike = 0.0;
+#endif
   float scuff = strike * smoothstep(0.55, 0.9, vnoise(vec3(p.x * 900.0, p.y * 3000.0, 1.0)));
   float h = strike * (grit - 0.5) * 0.00006 * detail(0.0004, fp) + (vnoise(p * 1200.0) - 0.5) * 0.00002 * detail(0.001, fp);
   // drawer seam on the ends
@@ -566,6 +657,9 @@ ${FRAG_PROLOGUE}
   N = bumpNormal(vW, N, h);
   Surface s = surf(vW, N, V);
   float paper = 0.74 + 0.05 * vnoise(p * 800.0);
+#ifdef PLAIN
+  paper *= 0.82;
+#endif
   s.albedo = vec3(paper * (1.0 - 0.82 * ink));
   s.albedo = mix(s.albedo, vec3(0.08 + 0.05 * grit) + scuff * 0.15, strike);
   s.rough = mix(0.62, 0.95, strike);

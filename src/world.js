@@ -1,4 +1,4 @@
-// Table, chrome band, pedestal, floor, matchbox, and the sixteen matches.
+// Table, chrome band, floor, matchbox, and the sixteen matches.
 import * as THREE from 'three';
 import { mulberry32, clamp, lerp, smoothstep } from './util.js';
 import { makeTableMaterial, makeMetalMaterial, makeFloorMaterial, makePaperMaterial, makeMatchMaterial, makeGlowMaterial } from './materials.js';
@@ -15,58 +15,49 @@ export const L_MIRROR_ONLY = 5; // seen only in the stone's reflection
 
 export function buildTable(scene) {
   const R = TABLE_R;
-  // the stone slab: flat top, polished bullnose edge, a short vertical lip
-  const stone = [[0.0004, 0], [R - 0.0085, 0]];
-  for (let i = 1; i <= 12; i++) {
-    const a = (i / 12) * Math.PI * 0.5;
-    stone.push([R - 0.0085 + Math.sin(a) * 0.008, -0.008 + Math.cos(a) * 0.008]);
+  // The stone slab: flat top, a small rounded arris dropping into the metal band.
+  // (lathe profiles run bottom to top along the outside, so their faces point out)
+  const stone = [[0.0004, 0], [R - 0.0055, 0]];
+  for (let i = 1; i <= 6; i++) {
+    const a = (i / 6) * Math.PI * 0.5;
+    stone.push([R - 0.0055 + Math.sin(a) * 0.0012, -0.0012 + Math.cos(a) * 0.0012]);
   }
-  stone.push([R - 0.0005, -0.0118], [R - 0.0035, -0.0126]);
-  // (lathe winding: profile runs from the underside up and in, so the top faces up)
+  stone.push([R - 0.0043, -0.012], [R - 0.007, -0.0125]);
   const top = new THREE.Mesh(new THREE.LatheGeometry(stone.reverse().map(([r, y]) => new THREE.Vector2(r, y)), 224), makeTableMaterial());
   top.position.y = TABLE_Y;
   top.layers.set(L_TABLE);
   top.name = 'tabletop';
   scene.add(top);
 
-  // nickel band under the stone: a shadow gap, two polished beads and a brushed face
-  const band = [[R - 0.0035, -0.0128], [R - 0.0008, -0.0132]];
-  const bead = (cy, r, n = 9) => {
-    for (let i = 0; i <= n; i++) {
-      const a = Math.PI * 0.5 - (i / n) * Math.PI;
-      band.push([R + 0.0002 + Math.cos(a) * r, cy + Math.sin(a) * r]);
-    }
-  };
-  bead(-0.0157, 0.0023);
-  band.push([R - 0.0004, -0.0186], [R - 0.0004, -0.0312]);
-  bead(-0.0338, 0.0023);
-  band.push([R - 0.0022, -0.0366], [R - 0.0200, -0.0369]);
-  const rim = new THREE.Mesh(new THREE.LatheGeometry(band.map(([r, y]) => new THREE.Vector2(r, y)), 200), makeMetalMaterial({ albedo: 0.8, rough: 0.07, aniso: 1 }));
+  // The polished metal siding the slab sits in (as in the shot: a bright convex band
+  // all round the edge). Its lip stands a millimetre proud of the stone with a fine
+  // dark seam; the convex face catches the lamp along its length.
+  const band = [[R - 0.020, -0.0315], [R - 0.0045, -0.0315]];
+  const cx = R - 0.0005, cy = -0.0153, rx = 0.0060, ry = 0.0163;
+  for (let i = 0; i <= 24; i++) {
+    const t = -Math.PI / 2 + (i / 24) * Math.PI;
+    band.push([cx + Math.cos(t) * rx, cy + Math.sin(t) * ry]);
+  }
+  band.push([R - 0.0028, 0.0009], [R - 0.0039, 0.0004], [R - 0.0042, -0.0025]);
+  const rim = new THREE.Mesh(new THREE.LatheGeometry(band.map(([r, y]) => new THREE.Vector2(r, y)), 256), makeMetalMaterial({ albedo: 0.86, rough: 0.045, aniso: 0, strip: 0.75 }));
   rim.position.y = TABLE_Y;
   rim.layers.set(L_MAIN_ONLY);
+  rim.name = 'siding';
   scene.add(rim);
 
-  // underside, pedestal, foot, floor
+  // underside and floor (no pedestal or foot: the top floats)
   const under = new THREE.Mesh(new THREE.CircleGeometry(R, 64).rotateX(Math.PI / 2), makeMetalMaterial({ albedo: 0.05, rough: 0.6 }));
-  under.position.y = TABLE_Y - 0.0368;
+  under.position.y = TABLE_Y - 0.0315;
   under.layers.set(L_MAIN_ONLY);
   scene.add(under);
-  const colGeo = new THREE.LatheGeometry([
-    new THREE.Vector2(0.0, 0.0), new THREE.Vector2(0.26, 0.0), new THREE.Vector2(0.27, 0.012), new THREE.Vector2(0.25, 0.024),
-    new THREE.Vector2(0.06, 0.05), new THREE.Vector2(0.042, 0.09), new THREE.Vector2(0.038, TABLE_Y - 0.12),
-    new THREE.Vector2(0.06, TABLE_Y - 0.06), new THREE.Vector2(0.14, TABLE_Y - 0.035), new THREE.Vector2(0.0, TABLE_Y - 0.03),
-  ], 48);
-  const col = new THREE.Mesh(colGeo, makeMetalMaterial({ albedo: 0.55, rough: 0.25 }));
-  col.layers.set(L_MAIN_ONLY);
-  scene.add(col);
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(14, 14).rotateX(-Math.PI / 2), makeFloorMaterial());
   floor.layers.set(L_MAIN_ONLY);
   scene.add(floor);
 
-  // matchbox at the right edge of the table (cut by frame in the shot)
-  const box = new THREE.Mesh(new THREE.BoxGeometry(0.053, 0.015, 0.036, 2, 1, 2), makePaperMaterial());
-  box.position.set(0.300, TABLE_Y + 0.0075, 0.085);
-  box.rotation.y = -0.38;
+  // matchbox at the right edge of the table, its drawer pushed half open, as in the shot
+  const box = buildMatchbox();
+  box.position.set(0.300, TABLE_Y, 0.078);
+  box.rotation.y = Math.PI - 0.30; // drawer toward the board, so the frame edge does not cut it
   scene.add(box);
 
   // A tall bright strip somewhere behind the opponent (a lit doorway, out of frame).
@@ -80,6 +71,70 @@ export function buildTable(scene) {
   scene.add(glow);
 
   return { top, rim, box, glow };
+}
+
+// ------------------------------------------------------------------ the matchbox
+// Sleeve (printed, striker strips, one end open) with the drawer slid out of that end,
+// a layer of matches lying in it heads-first. Origin: centre of the sleeve's base.
+function buildMatchbox() {
+  const g = new THREE.Group();
+  g.name = 'matchbox';
+  const L = 0.053, H = 0.015, Wd = 0.036;
+  // sleeve: a box without its +x end (the drawer comes out there)
+  const sg = new THREE.BoxGeometry(L, H, Wd, 2, 1, 2);
+  const keep = [];
+  const idx = sg.index.array;
+  for (const grp of sg.groups) if (grp.materialIndex !== 0) for (let i = grp.start; i < grp.start + grp.count; i++) keep.push(idx[i]);
+  sg.setIndex(keep);
+  sg.clearGroups();
+  const sleeve = new THREE.Mesh(sg, makePaperMaterial());
+  sleeve.position.y = H / 2;
+  g.add(sleeve);
+  // drawer: an open-topped tray of thin board
+  const t = 0.0007, tl = L - 0.002, th = H - 0.0018, tw = Wd - 0.0018;
+  const parts = [
+    [tl, t, tw, 0, t / 2, 0],
+    [tl, th, t, 0, th / 2, tw / 2 - t / 2], [tl, th, t, 0, th / 2, -tw / 2 + t / 2],
+    [t, th, tw - 2 * t, tl / 2 - t / 2, th / 2, 0], [t, th, tw - 2 * t, -tl / 2 + t / 2, th / 2, 0],
+  ].map(([x, y, z, px, py, pz]) => new THREE.BoxGeometry(x, y, z).translate(px, py, pz));
+  const tray = new THREE.Mesh(mergeGeometries(parts), makePaperMaterial({ plain: true }));
+  const out = 0.021; // how far the drawer stands out of the sleeve
+  tray.position.set(out, 0.0009, 0);
+  g.add(tray);
+  // matches in the drawer: one layer side by side, a few more on top, heads to the open end
+  const mg = matchGeometry();
+  const mm = makeMatchMaterial();
+  mm.uniforms.uSeed.value = 3.7;
+  const rnd = mulberry32(11);
+  const n = Math.floor((tw - 2 * t) / (MATCH_R * 2.15));
+  const lay = (k, layer) => {
+    const m = new THREE.Mesh(mg, mm);
+    const z = -tw / 2 + t + MATCH_R * 1.1 + k * MATCH_R * 2.15 + (layer ? MATCH_R * 1.07 : 0);
+    m.position.set(out + 0.0005 + (rnd() - 0.5) * 0.0016, 0.0009 + t + MATCH_R * (1 + layer * 1.85), z);
+    m.rotation.set((rnd() - 0.5) * 0.04, Math.PI / 2 + (rnd() - 0.5) * 0.05, 0);
+    g.add(m);
+  };
+  for (let k = 0; k < n; k++) lay(k, 0);
+  for (let k = 1; k < n - 2; k += 2) lay(k, 1);
+  return g;
+}
+function mergeGeometries(list) {
+  let vc = 0, ic = 0;
+  for (const gg of list) { vc += gg.attributes.position.count; ic += gg.index.count; }
+  const pos = new Float32Array(vc * 3), nor = new Float32Array(vc * 3), idx = new Uint32Array(ic);
+  let vo = 0, io = 0;
+  for (const gg of list) {
+    pos.set(gg.attributes.position.array, vo * 3);
+    nor.set(gg.attributes.normal.array, vo * 3);
+    for (let i = 0; i < gg.index.count; i++) idx[io + i] = gg.index.array[i] + vo;
+    vo += gg.attributes.position.count;
+    io += gg.index.count;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setIndex(new THREE.BufferAttribute(idx, 1));
+  return out;
 }
 
 // ------------------------------------------------------------------ matches

@@ -9,20 +9,53 @@ import { clamp, smoothstep, mulberry32, noise1 } from './util.js';
 export const SHOULDER_L = new THREE.Vector3(0.184, 0.486, -0.014);
 export const NECK_PIVOT = new THREE.Vector3(0, 0.655, -0.02);
 
-export function torsoSDF(x, y, z) {
+// The jacket's shoulders are skinned to the arms (see SHOULDERS in glsl.js): the cap of
+// each shoulder and a short stump of upper sleeve, modelled with the arm held at ARM_REST
+// (body's left; mirror x for the right), turn rigidly with the upper arm about the
+// shoulder joint, and the jacket between them and the body bends smoothly. The swept
+// sleeve continues straight out of that stump, so jacket and sleeve stay one piece.
+// (between the arms' real range: hanging at the lap, braced, reaching forward over the table)
+export const ARM_REST = new THREE.Vector3(0.55, -0.55, 0.63).normalize();
+// the stump reaches well down the upper arm: the sleeve starts on its plain cylinder, far
+// from where it blends into the body, so the two meet without a step
+export const STUMP = { len: 0.15, r: 0.0525, sleeveStart: 0.105 };
+// the body without its shoulder caps
+function torsoBodySDF(x, y, z) {
   let d = sdEllipsoid(x, y, z, 0, 0.12, 0.0, 0.162, 0.17, 0.112);
   d = smin(d, sdEllipsoid(x, y, z, 0, 0.345, 0.008, 0.178, 0.19, 0.118), 0.06);
   d = smin(d, sdEllipsoid(x, y, z, 0, 0.425, -0.036, 0.158, 0.11, 0.092), 0.04);
-  d = smin(d, sdCapsule(x, y, z, -0.155, 0.496, -0.014, 0.155, 0.496, -0.014, 0.058), 0.05);
-  d = smin(d, sdSphere(x, y, z, -0.192, 0.474, -0.012, 0.060), 0.03);
-  d = smin(d, sdSphere(x, y, z, 0.192, 0.474, -0.012, 0.060), 0.03);
+  // the line of the shoulders, neck to the top of each arm
+  d = smin(d, sdCapsule(x, y, z, -0.13, 0.498, -0.016, 0.13, 0.498, -0.016, 0.056), 0.05);
   // base of the collar (the collar itself is a separate, finer mesh)
   d = smin(d, sdRoundCone(x, y, z, 0, 0.485, -0.012, 0, 0.53, -0.02, 0.082, 0.072), 0.03);
+  return d;
+}
+// a shoulder cap (deltoid under the padding) and the top of the sleeve, both sides
+function torsoArmSDF(x, y, z) {
+  const ax = Math.abs(x), J = SHOULDER_L, U = ARM_REST, L = STUMP.len;
+  let d = sdSphere(ax, y, z, J.x - 0.004, J.y + 0.006, J.z, 0.056);
+  d = smin(d, sdCapsule(ax, y, z, J.x, J.y, J.z, J.x + U.x * L, J.y + U.y * L, J.z + U.z * L, STUMP.r), 0.025);
+  return d;
+}
+// the body and the arm blend broadly round the shoulder, barely down the arm (or the
+// blend webs the stump to the chest and the sleeve can't cover it)
+function armBlend(x, y, z) {
+  const J = SHOULDER_L, U = ARM_REST;
+  const t = (Math.abs(x) - J.x) * U.x + (y - J.y) * U.y + (z - J.z) * U.z;
+  return 0.04 - 0.032 * smoothstep(0.02, 0.07, t);
+}
+export function torsoSDF(x, y, z) {
+  let d = smin(torsoBodySDF(x, y, z), torsoArmSDF(x, y, z), armBlend(x, y, z));
   // neck opening
   d = smax(d, -sdCapsule(x, y, z, 0, 0.52, -0.016, 0, 0.80, -0.04, 0.058), 0.008);
   // cut off below the seat
   d = smax(d, -(y + 0.02), 0.02);
   return d;
+}
+// how much a point of the jacket turns with the arm (0 body .. 1 arm)
+export function torsoArmWeight(x, y, z) {
+  const b = torsoBodySDF(x, y, z), a = torsoArmSDF(x, y, z);
+  return smoothstep(-0.05, 0.06, b - a);
 }
 
 // The jacket collar: a rolled band standing up the back of the neck, dropping
@@ -67,14 +100,19 @@ function mergeMeshes(list) {
 let _torsoGeo = null;
 export function torsoGeometry() {
   if (_torsoGeo) return _torsoGeo;
-  const body = surfaceNets(torsoSDF, [-0.29, -0.06, -0.17], [0.29, 0.66, 0.17], 0.0098);
+  const body = surfaceNets(torsoSDF, [-0.31, -0.06, -0.17], [0.31, 0.66, 0.17], 0.0098);
   relaxOnSurface(body, torsoSDF, 1, 0.4);
   const collar = surfaceNets(jacketCollarSDF, [-0.09, 0.49, -0.12], [0.09, 0.645, 0.09], 0.0047);
   relaxOnSurface(collar, jacketCollarSDF, 1, 0.35);
   const m = mergeMeshes([meshToArrays(body), meshToArrays(collar)]);
+  // arm weights (the collar never moves with the arms)
+  const nBody = body.positions.length / 3, nAll = m.positions.length / 3;
+  const w = new Float32Array(nAll);
+  for (let i = 0; i < nBody; i++) w[i] = torsoArmWeight(m.positions[i * 3], m.positions[i * 3 + 1], m.positions[i * 3 + 2]);
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
   g.setAttribute('normal', new THREE.BufferAttribute(m.normals, 3));
+  g.setAttribute('aShW', new THREE.BufferAttribute(w, 1));
   g.setIndex(new THREE.BufferAttribute(m.indices, 1));
   g.computeBoundingSphere();
   _torsoGeo = g;
@@ -272,32 +310,24 @@ export function cuffGeometry() {
     [0.0331, -0.0035], [0.0328, -0.012], [0.0326, -0.065],
   ].map(([r, y]) => new THREE.Vector2(r, y));
   const g = new THREE.LatheGeometry(pts, 40);
-  // flatten into an ellipse (wrists are wider than deep) and open the seam where the link joins
+  // flatten into an ellipse (wrists are wider than deep), a faint seam on the outer side
   const pos = g.attributes.position;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i);
     const a = Math.atan2(z, x);
     const seam = Math.exp(-(a * a) / 0.02) * 0.0016;
     // fitted close to the wrist (a few millimetres of play), so its inside stays hidden
-    pos.setX(i, x * (1 + seam / 0.036) * 0.95);
+    pos.setX(i, x * (1 + seam / 0.036) * 0.93);
     pos.setZ(i, z * 0.74);
   }
   g.computeVertexNormals();
   return g;
 }
-export function cufflinkGeometry() {
-  // a small domed oval link
-  const g = new THREE.SphereGeometry(1, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.5);
-  g.scale(0.0062, 0.0022, 0.0048);
-  g.rotateZ(-Math.PI / 2);
-  return g;
-}
-
 // ------------------------------------------------------------------ sleeve: tube rebuilt every frame
 export class Sleeve {
   constructor(material, seed = 1) {
     this.NR = 18;
-    this.NL = 30;
+    this.NL = 36;
     this.extra = 3; // lip rings at the opening
     const rings = this.NL + this.extra;
     const g = new THREE.BufferGeometry();
@@ -309,7 +339,9 @@ export class Sleeve {
       for (let k = 0; k < this.NR; k++) {
         const a = r * this.NR + k, b = r * this.NR + ((k + 1) % this.NR);
         const c = (r + 1) * this.NR + k, d = (r + 1) * this.NR + ((k + 1) % this.NR);
-        idx.push(a, c, b, b, c, d);
+        // wound so the outside faces out: the cloth shader treats back faces as the
+        // lining (darker, no sheen), which is what the whole sleeve used to render as
+        idx.push(a, b, c, b, d, c);
       }
     g.setIndex(idx);
     // stable fabric coordinates so the weave does not swim as the arm moves
@@ -331,56 +363,79 @@ export class Sleeve {
     this._t = new THREE.Vector3();
     this._n = new THREE.Vector3();
     this._b = new THREE.Vector3();
+    this._endR = new Float32Array(this.NR);
   }
 
   /**
-   * S shoulder, E elbow, W wrist joint (world). fwdZ: dorsal hint for the forearm frame.
+   * S shoulder, E elbow, W wrist joint (world). refUp: hint for the frames' up.
    * Builds a smooth swept tube with elbow folds and a sleeve opening short of the wrist.
+   * opts.start: the tube begins this far down the upper arm from S, inside the jacket's
+   * shoulder stump (which turns with the arm, see ARM_REST), with radius opts.rShoulder
+   * a hair over the stump's so the sleeve covers it. Without it (trouser legs) the tube
+   * starts a little behind S and flares.
    */
   build(S, E, W, refUp, opts = {}) {
     const NR = this.NR, NL = this.NL;
     const rS = opts.rShoulder ?? 0.056, rE = opts.rElbow ?? 0.047, rW = opts.rWrist ?? 0.0385;
     const endBack = opts.endBack ?? 0.026;
+    const sewn = opts.start !== undefined;
     const u = new THREE.Vector3().subVectors(E, S);
     const l1 = u.length(); u.normalize();
     const f = new THREE.Vector3().subVectors(W, E);
     const l2 = f.length(); f.normalize();
-    const start = S.clone().addScaledVector(u, -0.035);
     const end = W.clone().addScaledVector(f, -endBack);
     const bend = Math.acos(clamp(u.dot(f), -1, 1)); // 0 straight
     const fillet = Math.min(0.06, l1 * 0.4, l2 * 0.4) * (0.4 + 0.6 * smoothstep(0.1, 1.2, bend));
     const E1 = E.clone().addScaledVector(u, -fillet);
     const E2 = E.clone().addScaledVector(f, fillet);
-    // path samples by arc length
-    const pts = [];
-    const lenA = start.distanceTo(E1), lenC = E2.distanceTo(end);
-    const lenB = fillet * 2 * 0.92;
-    const total = lenA + lenB + lenC;
+    // dense centreline: upper arm -> elbow fillet -> forearm
+    const D = this._dense || (this._dense = Array.from({ length: 64 }, () => new THREE.Vector3()));
+    let n = 0;
+    const push = (v) => { D[n++].copy(v); };
+    const p = new THREE.Vector3(), tmp = new THREE.Vector3();
+    const start = S.clone().addScaledVector(u, sewn ? Math.min(opts.start, l1 - fillet - 0.02) : -0.035);
+    for (let i = 0; i <= 12; i++) push(p.lerpVectors(start, E1, i / 12));
+    const iF = n;
+    for (let i = 1; i <= 10; i++) {
+      const t = i / 10;
+      push(p.copy(E1).multiplyScalar((1 - t) * (1 - t)).addScaledVector(E, 2 * (1 - t) * t).addScaledVector(E2, t * t));
+    }
+    const iElbow = iF + 4;
+    for (let i = 1; i <= 10; i++) push(p.lerpVectors(E2, end, i / 10));
+    const cum = this._cum || (this._cum = new Float32Array(64));
+    cum[0] = 0;
+    for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + D[i].distanceTo(D[i - 1]);
+    const total = cum[n - 1];
+    const sElbowD = cum[iElbow];
+    // rings evenly spaced by arc length along it
+    const pts = this._pts || (this._pts = Array.from({ length: NL }, () => ({ p: new THREE.Vector3(), s: 0, d: 0 })));
+    let seg = 1;
+    for (let i = 0; i < NL; i++) {
+      const d = (i / (NL - 1)) * total;
+      while (seg < n - 1 && cum[seg] < d) seg++;
+      const t = clamp((d - cum[seg - 1]) / Math.max(cum[seg] - cum[seg - 1], 1e-9), 0, 1);
+      pts[i].p.lerpVectors(D[seg - 1], D[seg], t);
+      pts[i].s = i / (NL - 1);
+      pts[i].d = d;
+    }
     const inner = new THREE.Vector3().addVectors(S, W).multiplyScalar(0.5).sub(E);
     if (inner.lengthSq() < 1e-8) inner.copy(refUp).cross(u);
     inner.normalize();
-    const p = new THREE.Vector3(), tmp = new THREE.Vector3();
-    const sElbow = (lenA + lenB * 0.5) / total;
-    for (let i = 0; i < NL; i++) {
-      // denser sampling near the elbow
-      let s = i / (NL - 1);
-      s = s + 0.12 * Math.sin((s - sElbow) * Math.PI * 2) * 0.0;
-      const d = s * total;
-      if (d <= lenA) p.copy(start).lerp(E1, d / lenA);
-      else if (d <= lenA + lenB) {
-        const t = (d - lenA) / lenB;
-        // quadratic bezier E1 -> E -> E2
-        p.copy(E1).multiplyScalar((1 - t) * (1 - t)).addScaledVector(E, 2 * (1 - t) * t).addScaledVector(E2, t * t);
-      } else p.copy(E2).lerp(end, (d - lenA - lenB) / lenC);
-      pts.push({ p: p.clone(), s, d });
-    }
     // rotation-minimising frames
     const T = this._t, Nn = this._n, B = this._b;
     T.subVectors(pts[1].p, pts[0].p).normalize();
-    Nn.copy(refUp).addScaledVector(T, -refUp.dot(T)).normalize();
+    Nn.copy(refUp).addScaledVector(T, -refUp.dot(T));
+    if (Nn.lengthSq() < 1e-8) Nn.set(0, 1, 0).addScaledVector(T, -T.y);
+    Nn.normalize();
     const pos = this.pos;
     const bendAmt = smoothstep(0.25, 1.9, bend);
-    const ringCenters = [];
+    // toward the opening the rings turn and flatten to match the cuff inside (opts.endX:
+    // the cuff's width axis; opts.endFlat: its depth / width), so the hem sits evenly
+    // around it instead of standing off it on some sides
+    const endX = opts.endX || null, endFlat = opts.endFlat ?? 0.93;
+    const Nr = this._nr || (this._nr = new THREE.Vector3()), Br = this._br || (this._br = new THREE.Vector3());
+    const Xp = this._xp || (this._xp = new THREE.Vector3());
+    let flat = 0.93;
     for (let i = 0; i < NL; i++) {
       const cur = pts[i].p;
       if (i > 0) {
@@ -392,41 +447,60 @@ export class Sleeve {
       B.crossVectors(T, Nn).normalize();
       const s = pts[i].s;
       const dist = pts[i].d;
-      // radius profile
-      const dE = dist - (lenA + lenB * 0.5);
+      Nr.copy(Nn);
+      Br.copy(B);
+      const wEnd = endX ? smoothstep(sElbowD + 0.03, total - 0.015, dist) : 0;
+      if (wEnd > 0) {
+        Xp.copy(endX).addScaledVector(T, -endX.dot(T));
+        if (Xp.lengthSq() > 1e-8) {
+          Xp.normalize();
+          const ang = Math.atan2(tmp.crossVectors(B, Xp).dot(T), B.dot(Xp)) * wEnd;
+          Br.applyAxisAngle(T, ang);
+          Nr.applyAxisAngle(T, ang);
+        }
+      }
+      // round where it covers the shoulder stump, an easy oval down the arm
+      const oval = sewn ? smoothstep(0.09, 0.17, dist) : 1;
+      flat = 1 + (0.93 - 1) * oval + (endFlat - 0.93) * wEnd;
+      // radius profile (full over the stump, tapering from its end)
+      const dE = dist - sElbowD;
       let r;
-      if (dE < 0) r = rS + (rE - rS) * smoothstep(0, 1, (dist) / (lenA + lenB * 0.5));
-      else r = rE + (rW - rE) * smoothstep(0, 1, dE / (lenC + lenB * 0.5));
-      // the shoulder end flares into the torso
-      r += 0.006 * (1 - smoothstep(0.0, 0.08, dist));
+      if (dE < 0) r = rS + (rE - rS) * smoothstep(sewn ? 0.08 : 0, 1, dist / sElbowD);
+      else r = rE + (rW - rE) * smoothstep(0, 1, dE / (total - sElbowD));
+      // (sewn: the first ring starts tucked inside the shoulder cap, never on its surface)
+      if (sewn) r *= 0.82 + 0.18 * smoothstep(0.0, 0.035, dist);
+      else r += 0.006 * (1 - smoothstep(0.0, 0.08, dist));
       const elbowEnv = Math.exp(-(dE * dE) / (0.055 * 0.055));
       const cuffEnv = smoothstep(total - 0.07, total - 0.01, dist);
       for (let k = 0; k < NR; k++) {
         const a = (k / NR) * Math.PI * 2;
         const ca = Math.cos(a), sa = Math.sin(a);
-        tmp.copy(Nn).multiplyScalar(ca).addScaledVector(B, sa);
+        tmp.copy(Nr).multiplyScalar(ca).addScaledVector(Br, sa);
         const inn = tmp.dot(inner);
         // folds on the inside of the bend, a couple of drag lines on the outside
         let disp = 0;
         disp += 0.0055 * bendAmt * elbowEnv * Math.max(0, inn) ** 1.5 * Math.sin(dE / 0.0135 * Math.PI + a * 1.7 + this.phase[0]);
         disp -= 0.0035 * bendAmt * elbowEnv * Math.max(0, inn) ** 2;
         disp += 0.0018 * bendAmt * elbowEnv * Math.max(0, -inn) * Math.sin(a * 3 + dE * 60 + this.phase[1]);
-        // bunching above the cuff
-        disp += 0.0016 * cuffEnv * Math.sin(a * 5 + this.phase[2] + dist * 90);
-        // cloth irregularity
-        disp += 0.0012 * Math.sin(a * 2 + dist * 23 + this.phase[3]) * Math.sin(dist * 11 + this.phase[4]);
-        const rr = (r + disp) * (k % 2 === 0 ? 1 : 1);
-        const ex = rr, ey = rr * 0.93;
+        // bunching above the cuff (outward only: the end of the sleeve never dips in
+        // toward the cuff or its own folded lining)
+        disp += 0.0016 * cuffEnv * (0.5 + 0.5 * Math.sin(a * 5 + this.phase[2] + dist * 90));
+        // cloth irregularity (none over the shoulder stump: it would let the stump through)
+        disp += 0.0012 * (1 - cuffEnv) * oval * Math.sin(a * 2 + dist * 23 + this.phase[3]) * Math.sin(dist * 11 + this.phase[4]);
+        const rr = r + disp;
+        if (i === NL - 1) this._endR[k] = rr;
+        const ex = rr, ey = rr * flat;
         const o = (i * NR + k) * 3;
-        pos[o] = cur.x + Nn.x * ca * ey + B.x * sa * ex;
-        pos[o + 1] = cur.y + Nn.y * ca * ey + B.y * sa * ex;
-        pos[o + 2] = cur.z + Nn.z * ca * ey + B.z * sa * ex;
+        pos[o] = cur.x + Nr.x * ca * ey + Br.x * sa * ex;
+        pos[o + 1] = cur.y + Nr.y * ca * ey + Br.y * sa * ex;
+        pos[o + 2] = cur.z + Nr.z * ca * ey + Br.z * sa * ex;
       }
-      ringCenters.push(cur.clone());
     }
-    // lip: fold the fabric back inside the opening to give it thickness
+    // lip: fold the fabric back inside the opening to give it thickness. Each lining ring
+    // follows the opening's own radius at that angle, tucked well inside it, so it can
+    // never poke out through the outer cloth (that showed as bright slivers at the hem).
     const last = pts[NL - 1].p;
-    const lipR = [rW - 0.0012, rW - 0.0028, rW - 0.0032];
+    const lipIn = [0.0010, 0.0022, 0.0040];
     const lipBack = [0.0012, 0.003, 0.03];
     for (let e = 0; e < this.extra; e++) {
       const c = tmp.copy(last).addScaledVector(T, -lipBack[e]);
@@ -434,10 +508,10 @@ export class Sleeve {
         const a = (k / NR) * Math.PI * 2;
         const ca = Math.cos(a), sa = Math.sin(a);
         const o = ((NL + e) * NR + k) * 3;
-        const rr = lipR[e];
-        pos[o] = c.x + (Nn.x * ca * 0.93 + B.x * sa) * rr;
-        pos[o + 1] = c.y + (Nn.y * ca * 0.93 + B.y * sa) * rr;
-        pos[o + 2] = c.z + (Nn.z * ca * 0.93 + B.z * sa) * rr;
+        const rr = Math.min(this._endR[k], rW) - lipIn[e];
+        pos[o] = c.x + (Nr.x * ca * flat + Br.x * sa) * rr;
+        pos[o + 1] = c.y + (Nr.y * ca * flat + Br.y * sa) * rr;
+        pos[o + 2] = c.z + (Nr.z * ca * flat + Br.z * sa) * rr;
       }
     }
     this.geometry.attributes.position.needsUpdate = true;
