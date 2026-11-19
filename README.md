@@ -4,6 +4,10 @@ The matchstick game from a famous black-and-white shot, rebuilt as a real-time
 three.js scene. You play over a man's shoulder against an opponent standing
 across a polished black marble table.
 
+![The reference still: two men at a black marble table with matches laid out in rows](docs/reference.jpg)
+
+*The reference shot ([via are.na](https://www.are.na/block/44634262)).*
+
 **The players:** you play over the man's shoulder. His left hand, the one in the shot, rests as in the still: forearm laid across the stone in front of him, cuff showing, a composed fist lying level with the thumb wrapped round the front. It works the left and centre of the board. His right hand rests on his thigh and comes up past the table edge for matches on the right. Each hand keeps its own pile. The opponent stands at the far side, as in the reference shot, with his weight braced on his left hand. `?lean=1` bends him low over the board instead, so his face hangs in the lamp light and shows in the polished stone.
 
 **The box:** the board starts empty. The opponent picks up the matchbox in his left hand, from above, fingers wrapped round the sleeve near its closed end. He slides the drawer further out and holds it over the board beside his right hand, which takes the matches from the open end a few at a time and lays out the rows, far to near. Then the drawer goes back in and the box back down.
