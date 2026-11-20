@@ -1,6 +1,6 @@
 // Table, chrome band, floor, matchbox, and the sixteen matches.
 import * as THREE from 'three';
-import { mulberry32, clamp, lerp, smoothstep } from './util.js';
+import { mulberry32 } from './util.js';
 import { makeTableMaterial, makeMetalMaterial, makeFloorMaterial, makePaperMaterial, makeMatchMaterial, makeGlowMaterial } from './materials.js';
 
 export const TABLE_Y = 0.74;

@@ -15,14 +15,13 @@ export class UI {
       modeTwo: document.getElementById('mode-two'),
       modeAuto: document.getElementById('mode-auto'),
     };
-    // one player against him, or two people taking turns at the same screen
+    // three modes: one player against him, two people taking turns at the same screen,
+    // or autoplay (he plays a random hand of yours against himself)
     let saved = 'ai';
     try { saved = localStorage.getItem('nim-mode') || 'ai'; } catch (e) { /* storage unavailable */ }
-    const q = new URLSearchParams(location.search).get('players');
-    this.players = q === '2' ? 'two' : q === '1' ? 'ai' : saved === 'two' ? 'two' : 'ai';
-    this.autoplay = new URLSearchParams(location.search).has('autoplay');
-    this.onPlayers = null; // (mode) => void
-    this.onAutoplay = null; // (on) => void
+    const qs = new URLSearchParams(location.search), q = qs.get('players');
+    this.mode = qs.has('autoplay') ? 'auto' : q === '2' ? 'two' : q === '1' ? 'ai' : ['ai', 'two', 'auto'].includes(saved) ? saved : 'ai';
+    this.onMode = null; // (mode, prev) => void
     this._mark();
     this.subTimer = 0;
     this.onConfirm = null;
@@ -40,34 +39,34 @@ export class UI {
     this.el.title.addEventListener('click', (e) => { if (e.target === this.el.title) this.toggleSettings(false); });
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.settingsOpen) this.toggleSettings(false); });
     const pick = (mode) => {
-      if (mode === this.players) return;
-      this.players = mode;
+      const prev = this.mode;
+      if (mode === prev) return;
+      this.mode = mode;
       try { localStorage.setItem('nim-mode', mode); } catch (err) { /* ignore */ }
       this._mark();
-      this.el.note.textContent = 'from the next game';
-      this.onPlayers && this.onPlayers(mode);
+      // autoplay starts and stops at once; who sits across the table changes with the next game
+      this.el.note.textContent = (prev === 'two') !== (mode === 'two') ? 'from the next game' : '';
+      this.onMode && this.onMode(mode, prev);
     };
     this.el.modeAI.addEventListener('click', () => pick('ai'));
     this.el.modeTwo.addEventListener('click', () => pick('two'));
-    this.el.modeAuto.addEventListener('click', () => {
-      this.autoplay = !this.autoplay;
-      this._mark();
-      this.onAutoplay && this.onAutoplay(this.autoplay);
-    });
+    this.el.modeAuto.addEventListener('click', () => pick('auto'));
   }
+  get players() { return this.mode === 'two' ? 'two' : 'ai'; }
+  get autoplay() { return this.mode === 'auto'; }
   get settingsOpen() { return this.el.title.classList.contains('show'); }
   toggleSettings(open = !this.settingsOpen) {
     this.el.title.classList.toggle('show', open);
+    document.body.classList.toggle('settings', open); // the subtitle and take buttons step aside for the credit
     this.el.title.setAttribute('aria-hidden', String(!open));
     this.el.gear.setAttribute('aria-expanded', String(open));
     if (!open) this.el.note.textContent = '';
   }
   _mark() {
-    this.el.modeAI.classList.toggle('pick', this.players === 'ai');
-    this.el.modeTwo.classList.toggle('pick', this.players === 'two');
-    this.el.modeAuto.classList.toggle('pick', this.autoplay);
-    this.el.modeAuto.setAttribute('aria-pressed', String(this.autoplay));
-    this.el.modeAuto.textContent = this.autoplay ? 'autoplay on' : 'autoplay off';
+    for (const [b, m] of [[this.el.modeAI, 'ai'], [this.el.modeTwo, 'two'], [this.el.modeAuto, 'auto']]) {
+      b.classList.toggle('pick', this.mode === m);
+      b.setAttribute('aria-pressed', String(this.mode === m));
+    }
   }
   ready() {
     this.el.loading.classList.add('gone');

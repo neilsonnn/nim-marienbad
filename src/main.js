@@ -371,7 +371,7 @@ function build() {
 
   director = new Director({ sched, matches, player, opponent, ui, foley, camera, box: table.box });
   director.autoplay = ui.autoplay;
-  ui.onAutoplay = (on) => director.setAutoplay(on);
+  ui.onMode = (mode) => director.setAutoplay(mode === 'auto');
   director.debugLoop = params.get('debug') === 'loop';
   director.debugFirst = params.get('first'); // ?debug=loop&first=opponent
   director.still = params.has('still');

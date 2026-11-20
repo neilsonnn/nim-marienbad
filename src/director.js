@@ -1,10 +1,10 @@
 // Game flow and choreography: who moves, what the hands do, where the heads look.
 import * as THREE from 'three';
 import { POSES, lerpPose } from './handModel.js';
-import { TABLE_Y, TABLE_R, ROWS, ROW_Z, ROW_X0, ROW_DX, Pile, tableQuat, MATCH_R, MATCH_LEN } from './world.js';
+import { TABLE_Y, TABLE_R, ROW_Z, ROW_X0, Pile, tableQuat, MATCH_R, MATCH_LEN } from './world.js';
 import { chooseMove } from './nim.js';
 import { DIAG, handPoints, tcpLocal } from './actors.js';
-import { clamp, lerp, smoothstep, DEG, rand, rng, mulberry32, easeOutCubic, quatFromYZ } from './util.js';
+import { clamp, lerp, smoothstep, DEG, rand, rng, mulberry32, quatFromYZ } from './util.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const WORDS = ['none', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];

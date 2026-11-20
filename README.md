@@ -40,7 +40,7 @@ works too; just upload the folder.
 
 ## Controls
 
-- The game starts straight away. The **gear** in the bottom-right corner opens the settings: **play against him** or **two players** (from the next game), and **autoplay** on or off, which takes effect at once with no reload. Click outside the buttons, or press Esc, to close it.
+- The game starts straight away. The **gear** in the bottom-right corner opens the settings: how to play, the three modes, and the credit line. The modes are **one player** (against him), **two players** (hot-seat; switching to or from it takes effect from the next game) and **autoplay** (random moves for you against him; starts and stops at once, no reload). The choice is remembered. While the settings are open the subtitles and take buttons step aside for the credit. Click outside the buttons, or press Esc, to close it.
 - **Hover** a match and the head of whoever is choosing turns slightly toward it.
 - **Click / tap** matches to select them, or **drag** across several. The first match you touch decides whether the stroke selects or deselects. Selections are limited to one row; picking a match in another row starts a new selection.
 - When only one match is left on your turn, there is nothing to decide: you take it automatically.
@@ -84,7 +84,8 @@ The table also gets analytic contact occlusion from every match and fingertip.
 - `?clean` hides the UI
 - `?fade` skips the fade-in
 - `?speed=4` runs the simulation 4× faster
-- `?autoplay` starts with autoplay on (it can also be switched in the settings): random moves for you, now and then a whole row; with two players it picks for both sides
+- `?autoplay` starts in autoplay mode, and `?players=1` / `?players=2` in one- or two-player mode, without changing the saved choice
+- `docs/og.jpg` is the 1200×630 link preview (Open Graph and X card tags in `index.html`), rendered from the opening shot with `?clean`. Once the game has a public URL, make `og:image` and `twitter:image` absolute links, since most sites ignore relative ones.
 - `?players=2` (or `?players=1`) preselects the players setting
 - `?debug=loop` runs a reach test instead of the game. The player first rakes in each row of three or more and lays it out again, then takes the whole board apart one match at a time and lays it out again, then the opponent does the same, forever. Every move is measured (overreach, elbow riding up, arm in the body, elbow snaps, lean jerk, extreme wrists, hand at the face). Failures go to the console and `window.__diag`. Add `&first=opponent` to start with him, and `&speed=4` to run it quickly.
 - `?still` starts no game at all, for driving the hands from the console. `nim.pause()`, `nim.advance(seconds)`, `nim.view(px, py, pz, tx, ty, tz)` and `nim.shot()` freeze the simulation, step it, and look from anywhere. `tools/inspect.js` has a clay material for inspecting shapes in shadow.

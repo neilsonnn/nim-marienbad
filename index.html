@@ -5,6 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#000000">
 <title>Nim</title>
+<meta name="description" content="The matchstick game from Last Year at Marienbad (1961), rebuilt in 3D. In turns, take as many matches as you want from any one row. The player who picks the last match loses.">
+<meta name="author" content="Neilson Koerner-Safrata">
+<!-- Open Graph (Facebook, LinkedIn, iMessage, Slack, Discord, WhatsApp) -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Nim">
+<meta property="og:title" content="Nim — Last Year at Marienbad">
+<meta property="og:description" content="The matchstick game from Last Year at Marienbad (1961), rebuilt in 3D. The player who picks the last match loses.">
+<meta property="og:image" content="docs/og.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Over a man's shoulder: sixteen matches in rows of 7, 5, 3 and 1 on a black marble table, an opponent's hands across it.">
+<meta property="og:locale" content="en_US">
+<!-- X / Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:creator" content="@neilsonks">
+<meta name="twitter:title" content="Nim — Last Year at Marienbad">
+<meta name="twitter:description" content="The matchstick game from Last Year at Marienbad (1961), rebuilt in 3D. The player who picks the last match loses.">
+<meta name="twitter:image" content="docs/og.jpg">
+<meta name="twitter:image:alt" content="Over a man's shoulder: sixteen matches in rows of 7, 5, 3 and 1 on a black marble table, an opponent's hands across it.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&display=swap" rel="stylesheet">
@@ -28,6 +48,12 @@
   #title .mode:focus-visible, #gear:focus-visible { outline: 1px dotted var(--dim); outline-offset: 4px; }
   #title.show .mode { pointer-events: auto; }
   #title .note { margin-top: 1.6em; font-size: 0.9rem; letter-spacing: 0.2em; color: var(--dim); font-style: italic; min-height: 1.4em; }
+  #title .credit { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(max(4.2vh, 28px) + env(safe-area-inset-bottom)); width: min(92vw, 40em); font-size: clamp(0.95rem, 2.1vw, 1.15rem); font-style: italic; color: var(--dim); line-height: 1.45; }
+  #title .credit cite { font-style: normal; }
+  #title .credit a { color: var(--ink); text-decoration: none; border-bottom: 1px solid rgba(236,233,226,0.35); pointer-events: auto; transition: border-color 0.3s ease; }
+  #title .credit a:hover { border-bottom-color: var(--ink); }
+  #title .credit a:focus-visible { outline: 1px dotted var(--dim); outline-offset: 4px; }
+  body.settings #sub, body.settings .btns { opacity: 0 !important; visibility: hidden; transition: none; }
   #gear { position: fixed; bottom: calc(10px + env(safe-area-inset-bottom)); right: calc(12px + env(safe-area-inset-right)); width: 44px; height: 44px; padding: 10px; opacity: 0.45; pointer-events: auto; transition: opacity 0.3s ease, transform 0.6s ease; z-index: 2; }
   #gear:hover, #gear[aria-expanded="true"] { opacity: 0.95; }
   #gear[aria-expanded="true"] { transform: rotate(60deg); }
@@ -58,15 +84,14 @@
 <div id="loading" class="ov">· · ·</div>
 <div id="title" class="ov" role="dialog" aria-label="Settings" aria-hidden="true">
   <h1>NIM</h1>
-  <p>Sixteen matches in four rows. On your turn, take as many as you like — but from one row only.<br>Whoever takes the last match loses.</p>
-  <div class="modes" role="group" aria-label="Players">
-    <button id="mode-ai" class="mode" type="button">play against him</button>
-    <button id="mode-two" class="mode" type="button">two players</button>
-  </div>
-  <div class="modes" role="group" aria-label="Autoplay">
+  <p>In turns, take as many matches as you want from any one row.<br>The player who picks the last match loses.</p>
+  <div class="modes" role="group" aria-label="Mode">
+    <button id="mode-ai" class="mode" type="button" aria-pressed="false">one player</button>
+    <button id="mode-two" class="mode" type="button" aria-pressed="false">two players</button>
     <button id="mode-auto" class="mode" type="button" aria-pressed="false">autoplay</button>
   </div>
   <div class="note" id="note"></div>
+  <footer class="credit">Original scene from <cite>Last Year at Marienbad</cite> (1961), made by <a href="https://x.com/neilsonks" target="_blank" rel="noopener">Neilson Koerner-Safrata</a></footer>
 </div>
 <div id="sub" class="ov" aria-live="polite"></div>
 <div class="btns">

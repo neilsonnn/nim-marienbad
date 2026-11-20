@@ -318,24 +318,6 @@ export function tcpLocal(side, pose) {
   return v;
 }
 
-// the middle fingertip (end of its distal bone) in the hand's frame, and its radius:
-// where a sweeping hand touches the stone
-const tipCache = new Map();
-export function tipLocal(side, pose) {
-  const key = side + ':' + Array.from(pose).map((x) => x.toFixed(1)).join(',');
-  let v = tipCache.get(key);
-  if (!v) {
-    const r = probe(side);
-    r.applyPose(pose, new THREE.Quaternion());
-    r.group.updateMatrixWorld(true);
-    const inv = new THREE.Matrix4().copy(r.group.matrixWorld).invert();
-    const p = new THREE.Vector3(0, FINGERS[1].len[2], 0).applyMatrix4(r.bones[FINGER_BONES[1][2]].matrixWorld).applyMatrix4(inv);
-    v = { p, r: FINGERS[1].rad[3] };
-    tipCache.set(key, v);
-  }
-  return v;
-}
-
 // the hand's contact spheres in its own frame for a pose (planning where it meets the stone)
 const ptsCache = new Map();
 export function handPoints(side, pose) {

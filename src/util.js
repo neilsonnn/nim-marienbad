@@ -15,7 +15,6 @@ export const minJerk = (t) => {
   return t * t * t * (10 + t * (-15 + 6 * t));
 };
 export const easeOutCubic = (t) => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
-export const easeInOutSine = (t) => 0.5 - 0.5 * Math.cos(Math.PI * clamp(t, 0, 1));
 
 // Deterministic PRNG so every run of the scene is reproducible per seed.
 export function mulberry32(seed) {
@@ -80,24 +79,6 @@ export class Spring {
     return this.x;
   }
 }
-export class Spring3 {
-  constructor(v = new THREE.Vector3(), halfLife = 0.2) {
-    this.x = v.clone();
-    this.v = new THREE.Vector3();
-    this.halfLife = halfLife;
-  }
-  update(target, dt, halfLife = this.halfLife) {
-    const y = (4 * 0.69314718) / (halfLife + 1e-5) / 2;
-    const eydt = Math.exp(-y * dt);
-    for (const k of ['x', 'y', 'z']) {
-      const j0 = this.x[k] - target[k];
-      const j1 = this.v[k] + j0 * y;
-      this.x[k] = eydt * (j0 + j1 * dt) + target[k];
-      this.v[k] = eydt * (this.v[k] - j1 * y * dt);
-    }
-    return this.x;
-  }
-}
 
 // Frame-driven scheduler: awaitable waits and tweens for choreography.
 export class Scheduler {
@@ -144,16 +125,4 @@ export function quatFromYZ(yDir, zHint, out = new THREE.Quaternion()) {
   _x.crossVectors(_y, _z).normalize();
   _m.makeBasis(_x, _y, _z);
   return out.setFromRotationMatrix(_m);
-}
-// Quaternion from local +Z forward and local +Y up hint.
-export function quatFromZY(zDir, yHint, out = new THREE.Quaternion()) {
-  _z.copy(zDir).normalize();
-  _y.copy(yHint).addScaledVector(_z, -yHint.dot(_z)).normalize();
-  _x.crossVectors(_y, _z).normalize();
-  _m.makeBasis(_x, _y, _z);
-  return out.setFromRotationMatrix(_m);
-}
-// Mirror a rotation across the YZ plane (x -> -x): used for left hands/arms.
-export function mirrorQuat(q, out = new THREE.Quaternion()) {
-  return out.set(q.x, -q.y, -q.z, q.w);
 }

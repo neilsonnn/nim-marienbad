@@ -681,11 +681,6 @@ export function initPoses() {
   return { pinch: pinch.dist, hold: hold.dist, ms: performance.now() - t0 };
 }
 
-export function handGeometryStats() {
-  const R = buildRightGeometry();
-  return { verts: R.verts, tris: R.indices.length / 3, ms: R.ms };
-}
-
 // Points (bone-local) used for the table-penetration constraint & contact AO.
 export const CONTACT_POINTS = (() => {
   const pts = [];
