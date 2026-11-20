@@ -870,7 +870,20 @@ export class Director {
       this.confirm();
     });
   }
-  // switched from the settings panel, no reload: takes over a choice already waiting
+  // switched from the settings panel, mid-game: whoever moves next is played the new way.
+  // Player two's open choice goes back to him; his thinking stops for player two.
+  setTwoPlayer(two) {
+    if (two === this.twoPlayer) return;
+    this.twoPlayer = two;
+    this._told = true;
+    if (!two && this.mode === 'select' && this.selector === 'opponent' && this._confirm) {
+      this.clearSelection();
+      const r = this._confirm;
+      this._confirm = null;
+      this.mode = 'ai-think';
+      r(null);
+    }
+  }
   setAutoplay(on) {
     this.autoplay = on;
     if (on && this.mode === 'select' && this._confirm) this.autoPick();
@@ -909,9 +922,6 @@ export class Director {
 
   async playGame() {
     this.games++;
-    // the players setting (changed in the settings panel) takes effect from a fresh game
-    const two = this.ui.players === 'two';
-    if (two !== this.twoPlayer) { this.twoPlayer = two; this.starter = 'player'; this._told = false; }
     let turn = this.starter;
     if (this.twoPlayer && !this._told) {
       this._told = true;
@@ -937,6 +947,7 @@ export class Director {
         const list = await this.waitForPlayer(turn);
         this.setHover(null);
         this.ui.say('');
+        if (!list) continue; // switched to one player: he takes this move himself
         if (turn === 'player') {
           this.mode = 'player-move';
           this.pHand = this.choosePlayerHand(list.map((m) => m.pos));
@@ -950,6 +961,7 @@ export class Director {
         this.mode = 'ai-think';
         this.ui.say('');
         await this.think(counts, total);
+        if (this.twoPlayer) continue; // switched to two players: player two takes this move
         const mv = chooseMove(counts, rng);
         // take contiguous matches from the end of the row nearest his hand
         const hx = this.oHand.displayWrist.x;
@@ -984,7 +996,7 @@ export class Director {
     this.opponent.sigh = 0.5;
     const rowsLeft = counts.map((c, i) => (c ? i : -1)).filter((i) => i >= 0);
     const steps = Math.max(2, Math.round(dur / 0.55));
-    for (let s = 0; s < steps; s++) {
+    for (let s = 0; s < steps && !this.twoPlayer; s++) {
       const r = rowsLeft[Math.floor(rng() * rowsLeft.length)];
       const ms = this.matches.inRow(r);
       const m = ms[Math.floor(rng() * ms.length)];

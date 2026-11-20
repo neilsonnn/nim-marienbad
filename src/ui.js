@@ -5,7 +5,6 @@ export class UI {
     this.el = {
       title: document.getElementById('title'),
       gear: document.getElementById('gear'),
-      note: document.getElementById('note'),
       sub: document.getElementById('sub'),
       take: document.getElementById('take'),
       clear: document.getElementById('clear'),
@@ -44,8 +43,6 @@ export class UI {
       this.mode = mode;
       try { localStorage.setItem('nim-mode', mode); } catch (err) { /* ignore */ }
       this._mark();
-      // autoplay starts and stops at once; who sits across the table changes with the next game
-      this.el.note.textContent = (prev === 'two') !== (mode === 'two') ? 'from the next game' : '';
       this.onMode && this.onMode(mode, prev);
     };
     this.el.modeAI.addEventListener('click', () => pick('ai'));
@@ -60,7 +57,6 @@ export class UI {
     document.body.classList.toggle('settings', open); // the subtitle and take buttons step aside for the credit
     this.el.title.setAttribute('aria-hidden', String(!open));
     this.el.gear.setAttribute('aria-expanded', String(open));
-    if (!open) this.el.note.textContent = '';
   }
   _mark() {
     for (const [b, m] of [[this.el.modeAI, 'ai'], [this.el.modeTwo, 'two'], [this.el.modeAuto, 'auto']]) {

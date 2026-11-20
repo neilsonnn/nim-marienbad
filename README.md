@@ -14,7 +14,7 @@ across a polished black marble table.
 
 **Non, c'est impossible:** lose to him and the line appears under the board. Click it and your man loses his temper: his left hand snaps back, slams down beside his matches and shoves them hard to the right, and they skid and hop off the table's right edge. The opponent sighs and lays the board out again, first from his own pile, then the rest from the box. Autoplay protests now and then by itself.
 
-**Two players:** pick "two players" in the settings panel (the gear, bottom right) to play hot-seat at one screen. Player one plays this side, over the shoulder, and player two plays the man across the table. Each picks matches the same way on their turn, and his hand carries out player two's choice. Player one starts the first game, and the opening player alternates after that. The switch takes effect from the next game.
+**Two players:** pick "two players" in the settings panel (the ? button, bottom right) to play hot-seat at one screen. Player one plays this side, over the shoulder, and player two plays the man across the table. Each picks matches the same way on their turn, and his hand carries out player two's choice. Player one starts the first game, and the opening player alternates after that. Switching takes effect mid-game: if he is thinking, player two takes his move; if player two is choosing, he takes it over.
 
 **Rules:** sixteen matches in rows of 7, 5, 3 and 1. On your turn you take as many
 matches as you like, but from one row only. Whoever takes the last match loses.
@@ -40,7 +40,7 @@ works too; just upload the folder.
 
 ## Controls
 
-- The game starts straight away. The **gear** in the bottom-right corner opens the settings: how to play, the three modes, and the credit line. The modes are **one player** (against him), **two players** (hot-seat; switching to or from it takes effect from the next game) and **autoplay** (random moves for you against him; starts and stops at once, no reload). The choice is remembered. While the settings are open the subtitles and take buttons step aside for the credit. Click outside the buttons, or press Esc, to close it.
+- The game starts straight away. The **?** button in the bottom-right corner opens the settings: how to play, the three modes, and the credit line. The modes are **one player** (against him), **two players** (hot-seat) and **autoplay** (random moves for you against him). Every switch takes effect at once, mid-game, with no reload. The choice is remembered. While the settings are open the subtitles and take buttons step aside for the credit. Click outside the buttons, or press Esc, to close it.
 - **Hover** a match and the head of whoever is choosing turns slightly toward it.
 - **Click / tap** matches to select them, or **drag** across several. The first match you touch decides whether the stroke selects or deselects. Selections are limited to one row; picking a match in another row starts a new selection.
 - When only one match is left on your turn, there is nothing to decide: you take it automatically.
