@@ -1,7 +1,7 @@
-// Table, chrome band, floor, matchbox, and the sixteen matches.
+// Table, chrome band, matchbox, and the sixteen matches.
 import * as THREE from 'three';
 import { mulberry32 } from './util.js';
-import { makeTableMaterial, makeMetalMaterial, makeFloorMaterial, makePaperMaterial, makeMatchMaterial, makeGlowMaterial } from './materials.js';
+import { makeTableMaterial, makeMetalMaterial, makePaperMaterial, makeMatchMaterial, makeGlowMaterial } from './materials.js';
 
 export const TABLE_Y = 0.74;
 export const TABLE_R = 0.37;
@@ -45,14 +45,11 @@ export function buildTable(scene) {
   rim.name = 'siding';
   scene.add(rim);
 
-  // underside and floor (no pedestal or foot: the top floats)
+  // underside (no pedestal, foot or floor: the top floats in the dark)
   const under = new THREE.Mesh(new THREE.CircleGeometry(R, 64).rotateX(Math.PI / 2), makeMetalMaterial({ albedo: 0.05, rough: 0.6 }));
   under.position.y = TABLE_Y - 0.0315;
   under.layers.set(L_MAIN_ONLY);
   scene.add(under);
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(14, 14).rotateX(-Math.PI / 2), makeFloorMaterial());
-  floor.layers.set(L_MAIN_ONLY);
-  scene.add(floor);
 
   // matchbox at the right edge of the table, its drawer pushed half open, as in the shot
   const box = buildMatchbox();

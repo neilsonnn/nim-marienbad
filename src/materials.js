@@ -586,7 +586,7 @@ export function bakeStone(renderer, size) {
   return { a: a.texture, b: b.texture };
 }
 
-// --------------------------------------------------------------------- metals / paper / floor
+// --------------------------------------------------------------------- metals / paper
 export function makeMetalMaterial({ albedo = 0.8, rough = 0.12, aniso = 0, strip = 0 } = {}) {
   return make({
     name: 'metal',
@@ -670,22 +670,3 @@ ${FRAG_PROLOGUE}
   });
 }
 
-export function makeFloorMaterial() {
-  return make({
-    name: 'floor',
-    frag: /* glsl */ `
-void main() {
-${FRAG_PROLOGUE}
-  // herringbone-ish parquet, almost entirely lost in the dark
-  vec2 q = vW.xz * 8.0;
-  vec2 c = floor(q);
-  float pl = mod(c.x + c.y, 2.0);
-  float grain = vnoise2(vec2(mix(q.x, q.y, pl) * 30.0, mix(q.y, q.x, pl) * 2.0));
-  Surface s = surf(vW, N, V);
-  s.albedo = vec3(0.04 + 0.03 * grain);
-  s.rough = 0.35;
-  vec3 col = shade(s) * exp(-dot(vW.xz, vW.xz) / (1.1 * 1.1));
-  gl_FragColor = finalColor(col, vW);
-}`,
-  });
-}

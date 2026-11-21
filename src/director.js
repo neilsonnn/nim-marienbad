@@ -56,6 +56,7 @@ export class Director {
     this.selRow = -1;
     this.starter = 'player';
     this.games = 0;
+    this.lossStreak = 0; // games in a row the near side has lost
     POSES.holdOpen = lerpPose(POSES.holdWide, POSES.reach, 0.55);
     // the matchbox: where it rests, and the hand holding it (if any)
     this.boxRest = { pos: this.box.position.clone(), quat: this.box.quaternion.clone() };
@@ -901,8 +902,12 @@ export class Director {
     for (;;) {
       await this.playGame();
       await this.sched.wait(1.6);
-      // beaten by him: "Non, c'est impossible" sweeps the table clean
-      if (!this.twoPlayer && this.loser === 'player' && (await this.ui.offerProtest(7, this.autoplay && rng() < 0.5))) {
+      // beaten three times running (any mode): "Non, c'est impossible" sweeps the table
+      // clean. The count starts again once it has been offered, taken or not.
+      this.lossStreak = this.loser === 'player' ? this.lossStreak + 1 : 0;
+      const offer = this.lossStreak >= 3;
+      if (offer) this.lossStreak = 0;
+      if (offer && (await this.ui.offerProtest(7, this.autoplay && rng() < 0.5))) {
         this.ui.say('');
         await this.protest();
       } else {

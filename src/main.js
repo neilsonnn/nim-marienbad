@@ -8,7 +8,7 @@ import { Director } from './director.js';
 import { Post } from './post.js';
 import { Foley } from './audio.js';
 import { UI } from './ui.js';
-import { Scheduler, Spring, DEG, quatFromYZ, clamp, smoothstep, fnoise } from './util.js';
+import { Scheduler, Spring, DEG, quatFromYZ, clamp, fnoise } from './util.js';
 
 const params = new URLSearchParams(location.search);
 // ?lean=1 bends the opponent low over the board (his face then shows in the stone)
@@ -45,7 +45,7 @@ mirrorCam.layers.enable(L_MIRROR_ONLY);
 // near plane close to the lamp so nothing between it and the bodies is ever clipped
 const lightCam = new THREE.PerspectiveCamera(58, 1, 0.05, 3.4);
 lightCam.layers.set(0);
-lightCam.layers.enable(L_TABLE); // the stone shades the floor
+lightCam.layers.enable(L_TABLE); // the stone casts the lamp's shadow
 lightCam.layers.enable(L_NO_MIRROR);
 
 // ------------------------------------------------------------------ lighting rig
@@ -88,29 +88,45 @@ if (params.has('cam')) {
 }
 // Narrow frames tighten the lens toward the board (a closer, taller shot).
 const PORTRAIT = { hfov: 21.5, target: new THREE.Vector3(0, TABLE_Y, 0) };
-const MIN_ASPECT = 0.78; // at this aspect and narrower, the portrait lens is used in full
 const BASE = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
+// ?opening freezes the first frame (unstepped, as the page holds it during the crossfade)
+// so it can be saved as the opening still with nim.opening(): wide covers 1:1 to 2.4:1,
+// portrait 0.4:1 to 1:1 (render it with the window at 1.3:1 and 0.4:1)
+const OPENING = params.has('opening');
+const OPENING_BOX = { wide: [1.3, 1], portrait: [1, 2.5] };
 // ------------------------------------------------------------------ the viewer's nudge
-// Scroll / pinch dollies toward the shot's own aim point (so it never re-aims), right-drag
+// The mouse wheel / pinch dollies toward the shot's own aim point (so it never re-aims), right-drag
 // turns the camera a few degrees around it. Each control keeps a raw value; what is shown
 // is a soft clamp whose slope falls off as a Gaussian (an erf curve), so it eases to a
 // stop at the edge instead of hitting a wall. The camera then glides toward it.
 const VIEW = {
   zoomLo: Math.log(0.42), zoomHi: Math.log(1.32), // dolly distance as a factor of the shot's
-  zoomDefault: Math.log(0.912), // lined up by hand with ?camdebug
   yawMax: 14 * DEG, pitchMax: 9 * DEG,
-  // the resting view swings round the table to the right and up from the shot, which
-  // looks down from higher and puts our man further over to the left (wiggle centred here)
-  yaw0: 15.1 * DEG, pitch0: 6.8 * DEG,
   // optional turn of the camera where it stands (none: it looks straight at the table's centre)
   turnRight: 0, tiltDown: 0,
-  // sideways slide of the whole camera (metres, + is screen-right) and how far the viewer may slide it
-  pan0: -0.089, panMax: 0.3,
+  // how far the viewer may slide the camera sideways (metres)
+  panMax: 0.3,
 };
+// The resting view, lined up by hand with ?camdebug: swung round the table (yaw0), raised
+// or lowered (pitch0), slid sideways (pan0, metres, + is screen-right) and dollied (zoom,
+// a factor of the shot's distance). Portrait screens get their own.
+const RESTS = {
+  wide: { yaw0: 14.2, pitch0: 4.7, pan0: -0.089, zoom: 0.912 },
+  portrait: { yaw0: 15.1, pitch0: 6.8, pan0: -0.089, zoom: 0.912 },
+};
+let rest = null;
+function useRest(name) {
+  if (rest === name) return;
+  rest = name;
+  const r = RESTS[name];
+  Object.assign(VIEW, { yaw0: r.yaw0 * DEG, pitch0: r.pitch0 * DEG, pan0: r.pan0 });
+  view.zRaw = view.z = Math.log(r.zoom);
+}
 // ?camdebug: free the limits, show the live view and copy it (paste the line back to Claude)
 const CAMDEBUG = params.has('camdebug');
 if (CAMDEBUG) Object.assign(VIEW, { zoomLo: Math.log(0.25), zoomHi: Math.log(2.5), yawMax: 80 * DEG, pitchMax: 35 * DEG, panMax: 1.5 });
-const view = { zRaw: VIEW.zoomDefault, yawRaw: 0, pitchRaw: 0, panRaw: 0, z: VIEW.zoomDefault, yaw: 0, pitch: 0, pan: 0 };
+const view = { zRaw: 0, yawRaw: 0, pitchRaw: 0, panRaw: 0, z: 0, yaw: 0, pitch: 0, pan: 0 };
+useRest(window.innerWidth < window.innerHeight ? 'portrait' : 'wide');
 // erf (Abramowitz & Stegun 7.1.26, |error| < 1.5e-7)
 function erf(x) {
   const s = Math.sign(x), a = Math.abs(x), t = 1 / (1 + 0.3275911 * a);
@@ -132,7 +148,20 @@ function rawClamp(x, lo, hi, band = 0.5) {
 }
 const ZB = 0.3; // zoom: the soft band is the outer 30% of each half of the range
 view.z = softClamp(view.zRaw, VIEW.zoomLo, VIEW.zoomHi, ZB);
-function nudgeZoom(d) { view.zRaw = rawClamp(view.zRaw + d, VIEW.zoomLo, VIEW.zoomHi, ZB); }
+// Zoom (scroll wheel, pinch) is the lens, not the camera: it narrows on the middle of the
+// frame and never goes wider than the shot. lens.z is log(magnification).
+const LENS_MAX = Math.log(4);
+const lens = { z: 0, zRaw: 0 };
+function nudgeLens(d) { lens.zRaw = clamp(lens.zRaw + d, 0, LENS_MAX); }
+function applyLens() {
+  const s = Math.exp(lens.z), w = canvas.clientWidth, h = canvas.clientHeight;
+  if (s < 1.0005) { if (camera.view && camera.view.enabled) camera.clearViewOffset(); }
+  else camera.setViewOffset(w, h, ((1 - 1 / s) / 2) * w, ((1 - 1 / s) / 2) * h, w / s, h / s);
+  table.top.material.uniforms.uReflScale.value = (reflRT.height * s) / (2 * Math.tan((camera.fov * DEG) / 2));
+  computePickScale(w, h); // matches grow as the lens narrows
+}
+// the lens's vertical field of view once zoomed (depth of field scales with it)
+const lensFov = () => (2 * Math.atan(Math.tan((camera.fov * DEG) / 2) / Math.exp(lens.z))) / DEG;
 function nudgePan(d) { view.panRaw = rawClamp(view.panRaw + d, -VIEW.panMax, VIEW.panMax); }
 function nudgeOrbit(dx, dy) {
   view.yawRaw = rawClamp(view.yawRaw + dx, -VIEW.yawMax, VIEW.yawMax);
@@ -167,6 +196,7 @@ function updateView(dt) {
   const ty = softClamp(view.yawRaw, -VIEW.yawMax, VIEW.yawMax);
   const tp = softClamp(view.pitchRaw, -VIEW.pitchMax, VIEW.pitchMax);
   const tx = softClamp(view.panRaw, -VIEW.panMax, VIEW.panMax);
+  if (Math.abs(lens.zRaw - lens.z) > 1e-6) { lens.z += (lens.zRaw - lens.z) * k; applyLens(); }
   if (Math.abs(tz - view.z) + Math.abs(ty - view.yaw) + Math.abs(tp - view.pitch) + Math.abs(tx - view.pan) < 1e-6) return;
   view.pan += (tx - view.pan) * k;
   view.z += (tz - view.z) * k;
@@ -201,11 +231,18 @@ function showCamDebug() {
 }
 function frameCamera(w, h) {
   const aspect = w / h;
-  // blend between the portrait and the reference composition
-  const k = smoothstep(MIN_ASPECT, 1.35, aspect);
+  const wide = aspect >= 1;
+  useRest(wide ? 'wide' : 'portrait');
+  // one lens for landscape screens and one for portrait, each keeping its width (and its
+  // height past 1.845:1), so every screen of a kind sees a crop of the same picture and
+  // the opening still in index.html can sit exactly under it
+  const k = wide ? 1 : 0;
   const hfov = params.has('cam') ? SHOT.hfov : PORTRAIT.hfov + (SHOT.hfov - PORTRAIT.hfov) * k;
   const tH = Math.tan((hfov * DEG) / 2);
-  const tanV = aspect >= SHOT.aspect ? tH / SHOT.aspect : tH / aspect;
+  let tanV = aspect >= SHOT.aspect ? tH / SHOT.aspect : tH / aspect;
+  // ?opening renders the still a little larger than any screen shows: OPENING_BOX is its
+  // half-size in units of the lens's half-width (the same numbers are in index.html)
+  if (OPENING) tanV = tH * OPENING_BOX[wide ? 'wide' : 'portrait'][1];
   camera.aspect = aspect;
   camera.fov = (2 * Math.atan(tanV)) / DEG;
   camera.position.copy(SHOT.pos);
@@ -274,7 +311,7 @@ function resize() {
   reflRT.setSize(Math.max(2, Math.round(W * rs)), Math.max(2, Math.round(H * rs)));
   post.setSize(W, H);
   frameCamera(cw, ch);
-  table.top.material.uniforms.uReflScale.value = reflRT.height / (2 * Math.tan((camera.fov * DEG) / 2));
+  applyLens();
   computePickScale(cw, ch);
 }
 
@@ -442,7 +479,8 @@ function pickMatch(x, y) {
 }
 // Taps and drags paint the selection: the first match touched decides whether the
 // stroke selects or deselects, and the stroke stays in that match's row.
-// Right-drag nudges the view a few degrees; the wheel or a pinch zooms within limits.
+// Right-drag or a trackpad two-finger drag nudges the view a few degrees; the mouse wheel
+// or a pinch zooms within limits.
 let stroke = null;
 function paintAt(x, y, type) {
   if (!stroke || !director || director.mode !== 'select') return;
@@ -491,8 +529,8 @@ canvas.addEventListener('pointermove', (e) => {
   if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pinch && touches.size === 2) {
     const span = touchSpan();
-    if (span > 1 && pinch.span > 1) nudgeZoom(-Math.log(span / pinch.span));
     const mid = touchMid();
+    if (span > 1 && pinch.span > 1) nudgeLens(Math.log(span / pinch.span));
     nudgeOrbit(-(mid.x - pinch.mid.x) * ORBIT_PER_PX(), (mid.y - pinch.mid.y) * ORBIT_PER_PX());
     pinch.span = span;
     pinch.mid = mid;
@@ -528,22 +566,20 @@ const endPointer = (e) => {
 };
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
-// trackpad: a pinch arrives as a ctrl-wheel (zoom), a two-finger drag as a plain wheel
-// (rotate). A notched mouse wheel (line mode) still zooms.
+// Scrolling (mouse wheel or trackpad) and pinching zoom; dragging moves the camera
+// (right-drag with a mouse, two fingers on a touch screen; shift slides it sideways).
 const PAN_PER_PX = () => 0.6 / Math.max(400, canvas.clientWidth); // a full-width drag slides 60 cm
 const ORBIT_PER_PX = () => (2.2 * VIEW.yawMax * 2) / Math.max(400, canvas.clientWidth);
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
-  if (e.ctrlKey) nudgeZoom(e.deltaY * unit * 0.008);
-  else if (e.deltaMode === 1) nudgeZoom(e.deltaY * unit * 0.0011);
-  else if (e.shiftKey) nudgePan((e.deltaX || e.deltaY) * PAN_PER_PX()); // shift turns vertical scroll into deltaX on macOS
-  else nudgeOrbit(e.deltaX * ORBIT_PER_PX(), e.deltaY * ORBIT_PER_PX());
+  const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+  // a trackpad pinch arrives as a ctrl-scroll
+  nudgeLens(e.ctrlKey ? -px * 0.01 : -Math.sign(px) * Math.min(0.2, 0.004 * Math.abs(px)));
 }, { passive: false });
 // Safari sends trackpad pinches as gesture events instead
 let gestureScale = 1;
 canvas.addEventListener('gesturestart', (e) => { e.preventDefault(); gestureScale = 1; });
-canvas.addEventListener('gesturechange', (e) => { e.preventDefault(); nudgeZoom(-Math.log(e.scale / gestureScale)); gestureScale = e.scale; });
+canvas.addEventListener('gesturechange', (e) => { e.preventDefault(); nudgeLens(Math.log(e.scale / gestureScale)); gestureScale = e.scale; });
 canvas.addEventListener('gestureend', (e) => e.preventDefault());
 canvas.addEventListener('dblclick', () => director && director.confirm());
 window.addEventListener('keydown', (e) => {
@@ -623,7 +659,7 @@ function step(dt) {
   updateFaceLight();
 }
 
-let fade = 0;
+let fade = 1; // no fade from black: the opening still (index.html) crossfades into the scene
 const dummyTex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
 dummyTex.needsUpdate = true;
 function render() {
@@ -648,7 +684,7 @@ function render() {
   renderer.setRenderTarget(mainRT);
   renderer.render(scene, camera);
   renderer.setClearAlpha(1);
-  post.setLens(focusDist.x, APERTURE, camera.fov);
+  post.setLens(focusDist.x, APERTURE, lensFov());
   // 4. film
   post.comp.uniforms.uFade.value = fade;
   post.comp.uniforms.uFlicker.value = fnoise(time * 9.0, 2) * 0.012;
@@ -705,9 +741,12 @@ function adapt(dt) {
   }
 }
 
-// ?speed=N runs the simulation N times faster (testing)
+// the simulation runs several steps a frame to go faster: the autoplay speed button,
+// or ?speed=N (testing)
 const SPEED = Math.max(1, Math.min(8, Number(params.get('speed')) || 1));
 let paused = false; // (debug: nim.pause() / nim.advance())
+// the scene holds its first frame until the opening still has faded into it
+let holding = true;
 // ?timer drives frames from a timer (for headless/background testing)
 const raf = params.has('timer') ? (f) => setTimeout(() => f(performance.now()), 16) : (f) => requestAnimationFrame(f);
 let last = performance.now();
@@ -717,8 +756,7 @@ function loop(now) {
   last = now;
   updateFps(frameMs);
   updateView(dt);
-  if (!paused) for (let i = 0; i < SPEED; i++) step(dt);
-  fade = Math.min(1, fade + dt / 2.5);
+  if (!paused && !holding) for (let i = 0, n = Math.max(SPEED, ui.pace); i < n; i++) step(dt);
   render();
   adapt(dt);
   raf(loop);
@@ -735,8 +773,7 @@ raf(() => {
       err.textContent = 'Something went wrong while building the scene.';
       return;
     }
-    ui.ready();
-    if (params.has('fade')) fade = 1;
+    if (!OPENING) ui.ready(() => (holding = false));
     last = performance.now();
     raf(loop);
     if (CAMDEBUG) showCamDebug();
@@ -771,4 +808,6 @@ window.nim = {
     render();
   },
   shot() { orbit.on = false; resize(); render(); },
+  // the current frame as a JPEG (drawn and read in one go, before the buffer is cleared)
+  opening(q = 0.9) { render(); return canvas.toDataURL('image/jpeg', q); },
 };

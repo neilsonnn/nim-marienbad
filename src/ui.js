@@ -13,7 +13,15 @@ export class UI {
       modeAI: document.getElementById('mode-ai'),
       modeTwo: document.getElementById('mode-two'),
       modeAuto: document.getElementById('mode-auto'),
+      speed: document.getElementById('speed'),
     };
+    // autoplay runs at 1x, 2x, 4x or 8x; the button cycles through them
+    this.speed = 1;
+    this.el.speed.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.speed = this.speed >= 8 ? 1 : this.speed * 2;
+      this.el.speed.textContent = `${this.speed}x`;
+    });
     // three modes: one player against him, two people taking turns at the same screen,
     // or autoplay (he plays a random hand of yours against himself)
     let saved = 'ai';
@@ -58,14 +66,26 @@ export class UI {
     this.el.title.setAttribute('aria-hidden', String(!open));
     this.el.gear.setAttribute('aria-expanded', String(open));
   }
+  // the game's pace: the speed button only counts during autoplay
+  get pace() { return this.autoplay ? this.speed : 1; }
   _mark() {
+    this.el.speed.classList.toggle('show', this.mode === 'auto');
     for (const [b, m] of [[this.el.modeAI, 'ai'], [this.el.modeTwo, 'two'], [this.el.modeAuto, 'auto']]) {
       b.classList.toggle('pick', this.mode === m);
       b.setAttribute('aria-pressed', String(this.mode === m));
     }
   }
-  ready() {
-    this.el.loading.classList.add('gone');
+  // the scene is built and holding its first frame: once that is drawn, the bar fills and
+  // it and the opening still fade quickly into the scene, which then starts (done)
+  ready(done) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      this.el.loading.classList.add('done');
+      setTimeout(() => {
+        this.el.loading.classList.add('gone');
+        document.getElementById('still').classList.add('gone');
+        setTimeout(done, 250);
+      }, 100);
+    }));
   }
   say(text, hold = 0) {
     const s = this.el.sub;
@@ -73,7 +93,7 @@ export class UI {
     if (!text) { s.classList.remove('show'); return; }
     s.textContent = text;
     s.classList.add('show');
-    if (hold > 0) this.subTimer = setTimeout(() => s.classList.remove('show'), hold * 1000);
+    if (hold > 0) this.subTimer = setTimeout(() => s.classList.remove('show'), (hold * 1000) / this.pace);
   }
   setSelection(n) {
     const words = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
@@ -94,8 +114,8 @@ export class UI {
       const done = (v) => { clearTimeout(t); this.onProtest = null; b.classList.remove('show'); res(v); };
       this.onProtest = () => done(true);
       b.classList.add('show');
-      t = setTimeout(() => done(false), sec * 1000);
-      if (auto) setTimeout(() => this.onProtest && this.onProtest(), 1800);
+      t = setTimeout(() => done(false), (sec * 1000) / this.pace);
+      if (auto) setTimeout(() => this.onProtest && this.onProtest(), 1800 / this.pace);
     });
   }
 }
