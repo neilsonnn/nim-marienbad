@@ -274,12 +274,9 @@ export class Director {
     }
     return worst;
   }
-  // The player uses the hand that can do the job with the least strain; the shot's left hand wins ties.
-  choosePlayerHand(pts) {
-    if (this.leftOnly) return this.pHandL; // ?left: every grab is the left hand's
-    const cl = this.handCost(this.pHandL, [...pts, this.piles.playerL.center]);
-    const cr = this.handCost(this.pHandR, [...pts, this.piles.player.center]);
-    return cl <= cr + 0.06 ? this.pHandL : this.pHandR;
+  // The player takes every match with his left hand; the right only re-lays what is in its own pile.
+  choosePlayerHand() {
+    return this.pHandL;
   }
   pileFor(hand) {
     if (hand === this.pHandL) return this.piles.playerL;
@@ -1131,7 +1128,8 @@ export class Director {
     await this.rebuild(this.pHandR, P.player, right, true, label);
     this.pHand = this.pHandL;
   }
-  // the left hand takes the nL slots it reaches most easily (relative to the right hand)
+  // re-laying, each hand lays only the matches in its own pile: the left hand takes the nL
+  // slots it reaches most easily (relative to the right hand), the right hand the rest
   splitPlayerSlots(slots, nL) {
     const pos = (sl) => this.matches.slotPose(sl.row, sl.col, false).pos;
     const pref = slots.map((sl) => ({ sl, d: this.handCost(this.pHandL, [pos(sl)]) - this.handCost(this.pHandR, [pos(sl)]) - pos(sl).x * 0.05 }));

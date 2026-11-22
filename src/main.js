@@ -12,8 +12,6 @@ import { UI } from './ui.js';
 import { Scheduler, Spring, DEG, quatFromYZ, clamp, fnoise } from './util.js';
 
 const params = new URLSearchParams(location.search);
-// ?left: the player's left hand does every grab
-const LEFT_ONLY = params.has('left');
 // ?lean=1 bends the opponent low over the board (his face then shows in the stone)
 const LEAN_IN = params.get('lean') === '1';
 if (params.has('clean')) document.body.classList.add('clean');
@@ -429,7 +427,6 @@ function build() {
   ui.onMode = (mode) => { director.setTwoPlayer(mode === 'two'); director.setAutoplay(mode === 'auto'); };
   director.debugLoop = params.get('debug') === 'loop';
   director.debugPlayer = params.get('debug') === 'player'; // the player's hands, every move, on a loop
-  director.leftOnly = LEFT_ONLY;
   director.debugFirst = params.get('first'); // ?debug=loop&first=opponent
   director.still = params.has('still');
   ui.onConfirm = () => director.confirm();
