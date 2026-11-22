@@ -123,9 +123,11 @@ function useRest(name) {
   Object.assign(VIEW, { yaw0: r.yaw0 * DEG, pitch0: r.pitch0 * DEG, pan0: r.pan0 });
   view.zRaw = view.z = Math.log(r.zoom);
 }
-// ?camdebug: free the limits, show the live view and copy it (paste the line back to Claude)
-const CAMDEBUG = params.has('camdebug');
-if (CAMDEBUG) Object.assign(VIEW, { zoomLo: Math.log(0.02), zoomHi: Math.log(50), yawMax: 80 * DEG, pitchMax: 35 * DEG, panMax: 1.5 });
+// camdebug (?camdebug, or the debug button): free the limits, show the live view and copy
+// it (paste the line back to Claude)
+let camDebug = false;
+const VIEW_LIMITS = { zoomLo: VIEW.zoomLo, zoomHi: VIEW.zoomHi, yawMax: VIEW.yawMax, pitchMax: VIEW.pitchMax, panMax: VIEW.panMax };
+const VIEW_FREE = { zoomLo: Math.log(0.02), zoomHi: Math.log(50), yawMax: 80 * DEG, pitchMax: 35 * DEG, panMax: 1.5 };
 const view = { zRaw: 0, yawRaw: 0, pitchRaw: 0, panRaw: 0, z: 0, yaw: 0, pitch: 0, pan: 0 };
 useRest(window.innerWidth < window.innerHeight ? 'portrait' : 'wide');
 // erf (Abramowitz & Stegun 7.1.26, |error| < 1.5e-7)
@@ -152,8 +154,7 @@ view.z = softClamp(view.zRaw, VIEW.zoomLo, VIEW.zoomHi, ZB);
 // Zoom (scroll wheel, pinch) is the lens, not the camera: it narrows on the middle of the
 // frame, and can open a little wider than the shot. lens.z is log(magnification).
 const LENS_MAX = Math.log(4), LENS_MIN = -Math.log(1.3);
-// (?camdebug: no zoom limits to speak of)
-const LENS_HI = CAMDEBUG ? Math.log(60) : LENS_MAX, LENS_LO = CAMDEBUG ? -Math.log(20) : LENS_MIN;
+let LENS_HI = LENS_MAX, LENS_LO = LENS_MIN; // (camdebug: no zoom limits to speak of)
 const lens = { z: 0, zRaw: 0 };
 function nudgeLens(d) { lens.zRaw = clamp(lens.zRaw + d, LENS_LO, LENS_HI); }
 function applyLens() {
@@ -206,7 +207,7 @@ function updateView(dt) {
   view.yaw += (ty - view.yaw) * k;
   view.pitch += (tp - view.pitch) * k;
   applyView();
-  if (CAMDEBUG) showCamDebug();
+  if (camDebug) showCamDebug();
 }
 let camDbgEl = null;
 function camLine() {
@@ -230,7 +231,24 @@ function showCamDebug() {
     camDbgEl.append(t, b);
     document.body.append(camDbgEl);
   }
+  camDbgEl.style.display = '';
   camDbgEl.firstChild.textContent = camLine();
+}
+function setCamDebug(on) {
+  camDebug = on;
+  Object.assign(VIEW, on ? VIEW_FREE : VIEW_LIMITS);
+  LENS_HI = on ? Math.log(60) : LENS_MAX;
+  LENS_LO = on ? -Math.log(20) : LENS_MIN;
+  if (!on) {
+    // back inside the usual limits (the soft clamp eases the view there)
+    lens.zRaw = clamp(lens.zRaw, LENS_LO, LENS_HI);
+    view.zRaw = rawClamp(view.zRaw, VIEW.zoomLo, VIEW.zoomHi, ZB);
+    view.yawRaw = rawClamp(view.yawRaw, -VIEW.yawMax, VIEW.yawMax);
+    view.pitchRaw = rawClamp(view.pitchRaw, -VIEW.pitchMax, VIEW.pitchMax);
+    view.panRaw = rawClamp(view.panRaw, -VIEW.panMax, VIEW.panMax);
+  }
+  if (on) showCamDebug();
+  else if (camDbgEl) camDbgEl.style.display = 'none';
 }
 function frameCamera(w, h) {
   const aspect = w / h;
@@ -420,7 +438,15 @@ function build() {
   oL.snapToRest();
 
   // ?ik: draw every IK target (wrist goals, elbows and their poles, knees, look targets)
-  if (params.has('ik')) ikDebug = new IKDebug([player, opponent]);
+  if (params.has('ik')) ikDebug = new IKDebug([player, opponent], { sliders: true });
+  // the debug button (beside the ? while the settings are open): the IK rig and the free
+  // camera with its readout, but not the sliders
+  ui.setDebug(params.has('ik'));
+  ui.onDebug = (on) => {
+    if (on && !ikDebug) ikDebug = new IKDebug([player, opponent]);
+    if (ikDebug) ikDebug.setOn(on);
+    setCamDebug(on);
+  };
   director = new Director({ sched, matches, player, opponent, ui, foley, camera, box: table.box });
   director.autoplay = ui.autoplay;
   director.twoPlayer = ui.players === 'two';
@@ -705,7 +731,7 @@ function render() {
   post.comp.uniforms.uFade.value = fade;
   post.comp.uniforms.uFlicker.value = fnoise(time * 9.0, 2) * 0.012;
   post.render(mainRT.texture, time);
-  if (ikDebug) ikDebug.render(renderer, camera);
+  if (ikDebug && ikDebug.on) ikDebug.render(renderer, camera);
 }
 
 // FPS counter (F toggles it)
@@ -793,7 +819,7 @@ raf(() => {
     if (!OPENING) ui.ready(() => (holding = false));
     last = performance.now();
     raf(loop);
-    if (CAMDEBUG) showCamDebug();
+    if (params.has('camdebug')) setCamDebug(true);
     director.run();
   }, 30);
 });

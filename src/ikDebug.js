@@ -19,8 +19,11 @@ const mat = (color, wire = false) => new THREE.MeshBasicMaterial({ color: raw(co
 const lineMat = (color, opacity = 0.9) => new THREE.LineBasicMaterial({ color: raw(color), depthTest: false, depthWrite: false, transparent: true, opacity });
 
 export class IKDebug {
-  constructor(actors) {
+  // (sliders: the live panel for each pinned elbow target, shown only with ?ik)
+  constructor(actors, { sliders = false } = {}) {
     this.actors = actors;
+    this.on = true;
+    this.els = []; // its page elements, hidden with it
     this.scene = new THREE.Scene();
     const ball = new THREE.SphereGeometry(1, 14, 10);
     const diamond = new THREE.OctahedronGeometry(1);
@@ -72,7 +75,12 @@ export class IKDebug {
     }
     this._legend();
     // sliders for every elbow target pinned beside a shoulder
-    for (const a of actors) for (const side of ['left', 'right']) if (a.arms[side].poleOffset) this._elbowPanel(a, side);
+    if (sliders) for (const a of actors) for (const side of ['left', 'right']) if (a.arms[side].poleOffset) this._elbowPanel(a, side);
+  }
+
+  setOn(on) {
+    this.on = on;
+    for (const el of this.els) el.style.display = on ? '' : 'none';
   }
 
   // live sliders for one elbow's pinned target, and a copy button for the config line
@@ -131,6 +139,7 @@ export class IKDebug {
     });
     el.append(out, btn);
     document.body.appendChild(el);
+    this.els.push(el);
   }
 
   update() {
@@ -178,5 +187,6 @@ export class IKDebug {
       [COL.look, '○ look target'],
     ].map(([c, t]) => `<div><span style="color:${hex(c)}">■</span> ${t}</div>`).join('');
     document.body.appendChild(el);
+    this.els.push(el);
   }
 }

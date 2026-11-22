@@ -5,6 +5,7 @@ export class UI {
     this.el = {
       title: document.getElementById('title'),
       gear: document.getElementById('gear'),
+      debug: document.getElementById('debug'),
       sub: document.getElementById('sub'),
       take: document.getElementById('take'),
       clear: document.getElementById('clear'),
@@ -44,6 +45,14 @@ export class UI {
     // settings: the gear opens the old title card; click outside its buttons (or Esc) to close
     this.el.gear.addEventListener('click', (e) => { e.stopPropagation(); this.toggleSettings(); });
     this.el.title.addEventListener('click', (e) => { if (e.target === this.el.title) this.toggleSettings(false); });
+    // the debug button beside it (only while the settings are open) shows the animation rig
+    this.debug = false;
+    this.onDebug = null; // (on) => void
+    this.el.debug.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setDebug(!this.debug);
+      this.onDebug && this.onDebug(this.debug);
+    });
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.settingsOpen) this.toggleSettings(false); });
     const pick = (mode) => {
       const prev = this.mode;
@@ -56,6 +65,10 @@ export class UI {
     this.el.modeAI.addEventListener('click', () => pick('ai'));
     this.el.modeTwo.addEventListener('click', () => pick('two'));
     this.el.modeAuto.addEventListener('click', () => pick('auto'));
+  }
+  setDebug(on) {
+    this.debug = on;
+    this.el.debug.setAttribute('aria-pressed', String(on));
   }
   get players() { return this.mode === 'two' ? 'two' : 'ai'; }
   get autoplay() { return this.mode === 'auto'; }
