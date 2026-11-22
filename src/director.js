@@ -276,6 +276,7 @@ export class Director {
   }
   // The player uses the hand that can do the job with the least strain; the shot's left hand wins ties.
   choosePlayerHand(pts) {
+    if (this.leftOnly) return this.pHandL; // ?left: every grab is the left hand's
     const cl = this.handCost(this.pHandL, [...pts, this.piles.playerL.center]);
     const cr = this.handCost(this.pHandR, [...pts, this.piles.player.center]);
     return cl <= cr + 0.06 ? this.pHandL : this.pHandR;
@@ -894,11 +895,12 @@ export class Director {
   async run() {
     // ?still: no game at all (debug: drive the hands from the console)
     if (this.still) { this.showBoard(); this.mode = 'idle'; return; }
-    if (this.debugLoop) this.showBoard();
+    if (this.debugLoop || this.debugPlayer) this.showBoard();
     // the opponent lays the first game out of the box
-    if (!this.debugLoop) await this.layOutFromBox();
+    if (!this.debugLoop && !this.debugPlayer) await this.layOutFromBox();
     await this.sched.wait(0.6);
     if (this.debugLoop) return this.runDebugLoop();
+    if (this.debugPlayer) return this.runPlayerLoop();
     for (;;) {
       await this.playGame();
       await this.sched.wait(1.6);
@@ -1058,6 +1060,62 @@ export class Director {
       const sum = DIAG.summary();
       console.info(`[diag] after cycle ${cycle}: ${sum.failing} of ${sum.moves} moves flagged`, sum.fails);
       this.ui.say(`Debug cycle ${cycle}: ${sum.failing} of ${sum.moves} moves flagged.`, 4);
+      await this.sched.wait(1);
+    }
+  }
+  // ?debug=player: every move the player's hands make, on a loop, each one named on screen.
+  // A cycle: every match taken one at a time (whichever hand he'd use), the board laid out
+  // again; handfuls of two and three from the row ends, laid out again; each long row raked
+  // in, and the protest that knocks his matches off the table (the opponent re-lays it).
+  async runPlayerLoop() {
+    DIAG.on = true;
+    window.__diag = DIAG;
+    const say = (t) => this.ui.say(t, 2.2);
+    let cycle = 0;
+    const take = async (list, what) => {
+      const hand = this.choosePlayerHand(list.map((m) => m.pos));
+      this.pHand = hand;
+      this.mode = 'player-move';
+      say(`${what} (${hand.side} hand)`);
+      DIAG.begin(`c${cycle} ${hand.side} ${what}`, hand);
+      await this.takeTurn(hand, list, this.pileFor(hand));
+      DIAG.end();
+      this.pHand = this.pHandL;
+    };
+    const relay = async () => {
+      this.mode = 'rebuild';
+      say('Laying the board out again');
+      await this.rebuildBy('player', `c${cycle} re-lay`);
+      await this.sched.wait(0.4);
+    };
+    const row = (r) => this.matches.inRow(r); // left to right
+    for (cycle = 1; ; cycle++) {
+      // 1. one at a time, near row first, alternating ends
+      for (const r of [3, 2, 1, 0]) {
+        for (let i = 0; row(r).length; i++) {
+          const ms = row(r);
+          await take([i % 2 ? ms[ms.length - 1] : ms[0]], `One match, row ${r + 1}`);
+        }
+      }
+      await relay();
+      // 2. handfuls from the ends of the rows (never a whole row: that is a rake)
+      for (const [r, plan] of [[2, ['L2']], [1, ['L3', 'R2']], [0, ['L3', 'R2', 'L2']], [3, ['L1']], [2, ['L1']]]) {
+        for (const step of plan) {
+          const ms = row(r), n = Math.min(+step[1], ms.length);
+          if (!n) continue;
+          const list = step[0] === 'L' ? ms.slice(0, n) : ms.slice(ms.length - n);
+          await take(list, n === 1 ? `One match, row ${r + 1}` : `${n} matches from the ${step[0] === 'L' ? 'left' : 'right'} of row ${r + 1}`);
+        }
+      }
+      await relay();
+      // 3. rake each long row in, take the last match, then the protest clears his side
+      for (const r of [2, 1, 0]) await take(row(r), `Raking in row ${r + 1}`);
+      if (row(3).length) await take(row(3), 'The last match');
+      say('Non, c\'est impossible: knocking his matches off the table');
+      await this.protest();
+      this.mode = 'idle';
+      const sum = DIAG.summary();
+      console.info(`[diag] after cycle ${cycle}: ${sum.failing} of ${sum.moves} moves flagged`, sum.fails);
       await this.sched.wait(1);
     }
   }

@@ -67,8 +67,8 @@ export const DIAG = {
 // Reach is soft-limited: the arm eases toward (but never reaches) a locked-straight
 // elbow, so there is always a little kink and no visible snap at full extension.
 export const REACH_SOFT = 0.9, REACH_MAX = 0.972;
-export function softReach(len, L) {
-  const s = L * REACH_SOFT, m = L * REACH_MAX;
+export function softReach(len, L, soft = REACH_SOFT, max = REACH_MAX) {
+  const s = L * soft, m = L * max;
   return len <= s ? len : s + (m - s) * Math.tanh((len - s) / (m - s));
 }
 export function solveTwoBone(S, W, L1, L2, poleDir, outE, outW) {
@@ -105,12 +105,21 @@ class Arm {
     this.E = new THREE.Vector3();
     this.W = new THREE.Vector3();
     this.foreQuat = new THREE.Quaternion();
-    const pl = actor.pole || [0.75, -0.45, -0.55];
+    const pl = (actor.poles && actor.poles[side]) || actor.pole || [0.75, -0.45, -0.55];
     this.poleLocal = new THREE.Vector3(this.s * pl[0], pl[1], pl[2]).normalize();
+    this.poleWeight = (actor.poleWeights && actor.poleWeights[side]) ?? 0.12; // how hard the elbow is pulled to its pole
+    this.elbowFloor = (actor.elbowFloors && actor.elbowFloors[side]) ?? null; // the elbow never drops below this height
+    // a target point pinned beside the shoulder that the elbow aims at: [out to his side,
+    // up, forward] in metres, turning with his body but never with his hand
+    const off = actor.poleOffsets && actor.poleOffsets[side];
+    this.poleOffset = off ? new THREE.Vector3(off[0], off[1], off[2]) : null;
+    this._po = new THREE.Vector3();
     this.shortfall = 0;
     this.elbowSpeed = 0;
     this.bodyPen = 0;
     this.pole = new THREE.Vector3();
+    this.goal = new THREE.Vector3(); // ?ik: the wrist target asked of the arm this frame
+    this.poleTarget = new THREE.Vector3(); // ?ik: the point the elbow is pulled toward
     this.protract = new Spring(0, 0.3);
     this.protractTarget = 0;
     // elbow direction (perpendicular to shoulder->wrist), smoothed in world space so it never pops
@@ -190,14 +199,24 @@ class Arm {
     const dir = this._dir.subVectors(Wt, this.S);
     const len = Math.max(dir.length(), 1e-6);
     dir.multiplyScalar(1 / len);
-    const reach = Math.max(softReach(len, L), Math.abs(this.L1 - this.L2) + 0.02);
+    const reach = Math.max(softReach(len, L, this.actor.reachSoft, this.actor.reachMax), Math.abs(this.L1 - this.L2) + 0.02);
     this.W.copy(this.S).addScaledVector(dir, reach);
     const a = (this.L1 * this.L1 - this.L2 * this.L2 + reach * reach) / (2 * reach);
     const h = Math.sqrt(Math.max(this.L1 * this.L1 - a * a, 0));
+    if (this.poleOffset) {
+      // aim the elbow at the pinned point: the pole runs from the arm's axis out to it
+      const o = this.poleOffset, po = this._po.set(this.s * o.x, o.y, o.z);
+      if (this.actor.poleFrame === 'yaw') po.applyAxisAngle(AXIS_Y, this.actor.yaw);
+      else po.transformDirection(this.actor.torsoMatrix).multiplyScalar(o.length());
+      this.poleTarget.copy(this.S).add(po);
+      this.pole.copy(this.poleTarget).sub(this.S).addScaledVector(dir, -a).normalize();
+    }
     // pole direction: where the elbow wants to point (out and down from the body)
     const pole = this._p.copy(this.pole).addScaledVector(dir, -this.pole.dot(dir));
     if (pole.lengthSq() < 1e-6) pole.set(0, -1, 0).addScaledVector(dir, dir.y);
     pole.normalize();
+    this.goal.copy(Wt);
+    if (!this.poleOffset) this.poleTarget.copy(this.S).addScaledVector(dir, a).addScaledVector(pole, 0.3);
     // current elbow direction carried along with the arm (parallel transport), so a big
     // change in reach direction rotates the elbow with it instead of re-projecting it
     const cur = this.elbowDir;
@@ -230,7 +249,13 @@ class Arm {
           const al = 1 - (fx * this.handY.x + fy * this.handY.y + fz * this.handY.z) / Math.max(Math.hypot(fx, fy, fz), 1e-6);
           wristCost = al * al * 1.6;
         }
-        const cost = this._penetration(dir, a, h, u, w, ang) * 4000 + dev * dev * (0.12 + 0.5 * (1 - extended)) + ang * ang * 0.08 + up * up * 3.0 + wristCost;
+        // (and never below its floor, if it has one)
+        let floorCost = 0;
+        if (this.elbowFloor !== null) {
+          const below = this.elbowFloor - (this.S.y + dir.y * a + h * c.y);
+          if (below > 0) floorCost = below * below * 4000;
+        }
+        const cost = floorCost + this._penetration(dir, a, h, u, w, ang) * 4000 + dev * dev * (this.poleWeight + 0.5 * (1 - extended)) + ang * ang * 0.08 + up * up * 3.0 + wristCost;
         if (cost < bc) { bc = cost; best.copy(c); }
       }
       // ease toward it (time-based, never instantaneous) with a cap on angular speed
@@ -248,6 +273,17 @@ class Arm {
       this.elbowSpeed = Math.min(turn, maxTurn) / dt;
       this.bodyPen = Math.sqrt(this._penetration(dir, a, h, cur, this._w.crossVectors(dir, cur), 0));
       this.shortfall = len - reach;
+    }
+    // a hard floor: swing the elbow (around the shoulder-wrist axis) the least it takes to
+    // keep it from hanging below its floor, or as high as it goes if it can't
+    if (this.elbowFloor !== null && h > 1e-4) {
+      const need = (this.elbowFloor - this.S.y - dir.y * a) / h;
+      if (cur.y < need) {
+        const w = this._w.crossVectors(dir, cur);
+        const R = Math.hypot(cur.y, w.y), top = Math.atan2(w.y, cur.y);
+        const th = R * 1.0001 <= need ? top : top - Math.sign(top) * Math.acos(clamp(need / R, -1, 1));
+        cur.multiplyScalar(Math.cos(th)).addScaledVector(w, Math.sin(th)).normalize();
+      }
     }
     this.E.copy(this.S).addScaledVector(dir, a).addScaledVector(cur, h);
     return len - reach; // > 0 means the hand could not reach
@@ -590,6 +626,12 @@ export class HandController {
         r();
       }
     }
+    // a hanging arm hangs from wherever the shoulder is (lean in, and it swings along)
+    if (this.hang && !this.seg && this.arm.S.lengthSq() > 0) {
+      const S = this.arm.S, y = a.yaw, h = this.hang, o = h.out * this.arm.s;
+      _v1.set(S.x + Math.cos(y) * o + Math.sin(y) * h.fwd, S.y - h.down, S.z - Math.sin(y) * o + Math.cos(y) * h.fwd);
+      this.wrist.lerp(_v1, 1 - Math.exp(-dt / 0.25));
+    }
     this.planted += (this.plantTarget - this.planted) * Math.min(1, dt * 6);
 
     // ---- idle life
@@ -727,6 +769,7 @@ export class HandController {
       this.contactWorld.push({ x: _v1.x, y: _v1.y, z: _v1.z, r: c.r });
       if (_v1.x * _v1.x + _v1.z * _v1.z > (TABLE_R + 0.01) ** 2) continue;
       const d = TABLE_Y + c.r * 0.92 - _v1.y;
+      if (d > 0.08) continue; // well below the stone: under it (a hanging hand), not in it
       if (d > worst) worst = d;
     }
     return worst;
@@ -758,6 +801,10 @@ export class Actor {
     this.baseLean = cfg.lean;
     this.armLen = cfg.armLen || [0.305, 0.275];
     this.pole = cfg.pole || null;
+    this.poles = cfg.poles || null; // per arm, overriding pole
+    this.poleWeights = cfg.poleWeights || null; // per arm, how hard the elbow follows it
+    this.elbowFloors = cfg.elbowFloors || null; // per arm, the lowest the elbow may hang
+    this.poleOffsets = cfg.poleOffsets || null; // per arm, a point beside the shoulder the elbow aims at
     this.lean = new Spring(cfg.lean, 0.16);
     this.leanAcc = 0;
     this._leanV = 0;
@@ -780,6 +827,9 @@ export class Actor {
     this.extraLean = 0;
     this.maxExtraLean = cfg.maxExtraLean ?? 0.45;
     this.twistGain = cfg.twistGain ?? 0.34;
+    // how far the arm straightens before the body leans in (fractions of the arm's length)
+    this.reachSoft = cfg.reachSoft ?? REACH_SOFT;
+    this.reachMax = cfg.reachMax ?? REACH_MAX;
     this.reachSlide = cfg.reachSlide ?? 0;
     // posture: 0 = the authored stance, 1 = bent low over the board (hips down, deeper lean)
     this.postureBase = cfg.posture ?? 0;
@@ -874,7 +924,7 @@ export class Actor {
   // smallest lean that lets `arm` reach the wrist target (with protraction & twist)
   // (continuous: bisection on the shoulder-to-target distance, so it never steps)
   requiredLean(arm, Wt, twist, protract, minLean = this.baseLean) {
-    const reach = (arm.L1 + arm.L2) * (REACH_SOFT - 0.01);
+    const reach = (arm.L1 + arm.L2) * (this.reachSoft - 0.01);
     const tmp = this._tmpM || (this._tmpM = new THREE.Matrix4());
     const S = this._tmpS || (this._tmpS = new THREE.Vector3());
     const over = (l) => {
@@ -917,6 +967,7 @@ export class Actor {
     let twist = fnoise(t * 0.03 + this.seed, 2) * 0.02;
     for (const side in this.hands) {
       const h = this.hands[side];
+      if (h.hang && !h.seg) continue; // a hanging arm asks nothing of the body
       const arm = h.arm;
       const target = h.finalTarget();
       const S = arm.S;
@@ -991,6 +1042,7 @@ export class Actor {
       leg.H.y -= 0.03;
       const pole = _v2.copy(leg.f).multiplyScalar(1).add(_v1.set(0, this.seated ? 0.6 : 0.15, 0)).normalize();
       solveTwoBone(leg.H, leg.ankle, 0.455, 0.445, pole, leg.K, leg.A);
+      (leg.poleTarget || (leg.poleTarget = new THREE.Vector3())).copy(leg.H).lerp(leg.ankle, 0.5).addScaledVector(pole, 0.3);
       leg.tube.build(leg.H, leg.K, leg.A, leg.f, { rShoulder: 0.078, rElbow: 0.058, rWrist: 0.047, endBack: -0.02 });
     }
 

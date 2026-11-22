@@ -4,6 +4,7 @@ import { G, OCC_N, setQuality, makeSkinMaterial, makeHeadMaterial, makeClothMate
 import { buildTable, MatchSet, TABLE_Y, TABLE_R, L_TABLE, L_MAIN_ONLY, L_NO_MIRROR, L_NO_SHADOW, L_MIRROR_ONLY, ROW_X0, ROW_DX, ROW_Z } from './world.js';
 import { initPoses, POSES } from './handModel.js';
 import { Actor } from './actors.js';
+import { IKDebug } from './ikDebug.js';
 import { Director } from './director.js';
 import { Post } from './post.js';
 import { Foley } from './audio.js';
@@ -11,6 +12,8 @@ import { UI } from './ui.js';
 import { Scheduler, Spring, DEG, quatFromYZ, clamp, fnoise } from './util.js';
 
 const params = new URLSearchParams(location.search);
+// ?left: the player's left hand does every grab
+const LEFT_ONLY = params.has('left');
 // ?lean=1 bends the opponent low over the board (his face then shows in the stone)
 const LEAN_IN = params.get('lean') === '1';
 if (params.has('clean')) document.body.classList.add('clean');
@@ -111,7 +114,7 @@ const VIEW = {
 // or lowered (pitch0), slid sideways (pan0, metres, + is screen-right) and dollied (zoom,
 // a factor of the shot's distance). Portrait screens get their own.
 const RESTS = {
-  wide: { yaw0: 14.2, pitch0: 4.7, pan0: -0.089, zoom: 0.912 },
+  wide: { yaw0: 31.6, pitch0: 5.7, pan0: -0.089, zoom: 0.912 },
   portrait: { yaw0: 15.1, pitch0: 6.8, pan0: -0.089, zoom: 0.912 },
 };
 let rest = null;
@@ -124,7 +127,7 @@ function useRest(name) {
 }
 // ?camdebug: free the limits, show the live view and copy it (paste the line back to Claude)
 const CAMDEBUG = params.has('camdebug');
-if (CAMDEBUG) Object.assign(VIEW, { zoomLo: Math.log(0.25), zoomHi: Math.log(2.5), yawMax: 80 * DEG, pitchMax: 35 * DEG, panMax: 1.5 });
+if (CAMDEBUG) Object.assign(VIEW, { zoomLo: Math.log(0.02), zoomHi: Math.log(50), yawMax: 80 * DEG, pitchMax: 35 * DEG, panMax: 1.5 });
 const view = { zRaw: 0, yawRaw: 0, pitchRaw: 0, panRaw: 0, z: 0, yaw: 0, pitch: 0, pan: 0 };
 useRest(window.innerWidth < window.innerHeight ? 'portrait' : 'wide');
 // erf (Abramowitz & Stegun 7.1.26, |error| < 1.5e-7)
@@ -149,13 +152,15 @@ function rawClamp(x, lo, hi, band = 0.5) {
 const ZB = 0.3; // zoom: the soft band is the outer 30% of each half of the range
 view.z = softClamp(view.zRaw, VIEW.zoomLo, VIEW.zoomHi, ZB);
 // Zoom (scroll wheel, pinch) is the lens, not the camera: it narrows on the middle of the
-// frame and never goes wider than the shot. lens.z is log(magnification).
-const LENS_MAX = Math.log(4);
+// frame, and can open a little wider than the shot. lens.z is log(magnification).
+const LENS_MAX = Math.log(4), LENS_MIN = -Math.log(1.3);
+// (?camdebug: no zoom limits to speak of)
+const LENS_HI = CAMDEBUG ? Math.log(60) : LENS_MAX, LENS_LO = CAMDEBUG ? -Math.log(20) : LENS_MIN;
 const lens = { z: 0, zRaw: 0 };
-function nudgeLens(d) { lens.zRaw = clamp(lens.zRaw + d, 0, LENS_MAX); }
+function nudgeLens(d) { lens.zRaw = clamp(lens.zRaw + d, LENS_LO, LENS_HI); }
 function applyLens() {
   const s = Math.exp(lens.z), w = canvas.clientWidth, h = canvas.clientHeight;
-  if (s < 1.0005) { if (camera.view && camera.view.enabled) camera.clearViewOffset(); }
+  if (Math.abs(s - 1) < 5e-4) { if (camera.view && camera.view.enabled) camera.clearViewOffset(); }
   else camera.setViewOffset(w, h, ((1 - 1 / s) / 2) * w, ((1 - 1 / s) / 2) * h, w / s, h / s);
   table.top.material.uniforms.uReflScale.value = (reflRT.height * s) / (2 * Math.tan((camera.fov * DEG) / 2));
   computePickScale(w, h); // matches grow as the lens narrows
@@ -286,7 +291,7 @@ function makeTargets() {
 const sched = new Scheduler();
 const foley = new Foley();
 const ui = new UI(foley);
-let post, matches, table, player, opponent, director;
+let post, matches, table, player, opponent, director, ikDebug = null;
 let quality = 1.0;
 let W = 0, H = 0;
 // Render scale: the device pixel ratio, capped by a pixel budget, then trimmed by the
@@ -344,15 +349,22 @@ function build() {
     name: 'player',
     seated: true,
     castsBody: false,
-    hip: new THREE.Vector3(-0.282, 0.49, 0.826),
+    hip: new THREE.Vector3(-0.282, 0.40, 0.626), // snug up to the table, sitting low
     yaw: Math.atan2(0.06, -1.0),
-    lean: 0.6,
+    lean: 0.45,
+    reachSoft: 0.985, // he straightens his arm (to ~20° of bend) before he leans in
+    reachMax: 0.998, // and can reach all but straight (~7°)
     maxExtraLean: 0.36,
     reachSlide: 0.06,
     twistGain: 0.26,
     armLen: [0.318, 0.29],
     // elbows carried out to the side, a little down and back, whatever the lean
     pole: [0.88, -0.28, -0.38],
+    // the left elbow aims at a point well out to his left ([out, up, forward] from the
+    // shoulder; tune it live with ?ik), and follows it hard, even with the arm out straight
+    poleOffsets: { left: [1.14, -0.8, -0.15] },
+    poleWeights: { left: 1.2 },
+    elbowFloors: { left: TABLE_Y }, // but never drops below the stone
     poleFrame: 'yaw',
     hands: ['left', 'right'],
     breathRate: 0.23,
@@ -389,13 +401,16 @@ function build() {
     w.y = player.hip.y + 0.118;
     pR.setRest(w, quatFromYZ(f.clone().setY(-0.12), new THREE.Vector3(-left.x * 0.25, 1, -left.z * 0.25)), POSES.relaxed);
     pR.lapRest = true;
+    // between moves it hangs at his side, swinging along with his shoulder
+    pR.setRest(w.clone().setY(0.3), quatFromYZ(new THREE.Vector3(f.x * 0.15, -1, f.z * 0.15), left.clone().negate()), POSES.relaxed);
+    pR.hang = { out: 0.04, down: 0.585, fwd: 0.0 };
     pR.edgeQuat = quatFromYZ(f.clone().setY(-0.35), new THREE.Vector3(0, 1, 0));
     pR.snapToRest();
   }
   const pl = player.hands.left;
   // as in the still: the forearm laid across the stone in front of him, cuff showing, a
   // composed fist lying level, back of the hand straight up, thumb wrapped round the front
-  pl.setRest(new THREE.Vector3(-0.15, 0.78, 0.25), quatFromYZ(new THREE.Vector3(1, 0, -0.04), new THREE.Vector3(0, 1, 0)), POSES.fist);
+  pl.setRest(new THREE.Vector3(-0.24, 0.78, 0.15), quatFromYZ(new THREE.Vector3(1, 0, -0.04), new THREE.Vector3(0, 1, 0)), POSES.fist);
   pl.snapToRest();
   const oR = opponent.hands.right; // screen-left, the one that plays
   oR.setRest(new THREE.Vector3(-0.205, 0.785, -0.398), quatFromYZ(new THREE.Vector3(0.0, -0.34, 1.0), new THREE.Vector3(-0.08, 1.0, 0.34)), POSES.poised);
@@ -406,11 +421,15 @@ function build() {
   oL.brace = true;
   oL.snapToRest();
 
+  // ?ik: draw every IK target (wrist goals, elbows and their poles, knees, look targets)
+  if (params.has('ik')) ikDebug = new IKDebug([player, opponent]);
   director = new Director({ sched, matches, player, opponent, ui, foley, camera, box: table.box });
   director.autoplay = ui.autoplay;
   director.twoPlayer = ui.players === 'two';
   ui.onMode = (mode) => { director.setTwoPlayer(mode === 'two'); director.setAutoplay(mode === 'auto'); };
   director.debugLoop = params.get('debug') === 'loop';
+  director.debugPlayer = params.get('debug') === 'player'; // the player's hands, every move, on a loop
+  director.leftOnly = LEFT_ONLY;
   director.debugFirst = params.get('first'); // ?debug=loop&first=opponent
   director.still = params.has('still');
   ui.onConfirm = () => director.confirm();
@@ -689,6 +708,7 @@ function render() {
   post.comp.uniforms.uFade.value = fade;
   post.comp.uniforms.uFlicker.value = fnoise(time * 9.0, 2) * 0.012;
   post.render(mainRT.texture, time);
+  if (ikDebug) ikDebug.render(renderer, camera);
 }
 
 // FPS counter (F toggles it)
