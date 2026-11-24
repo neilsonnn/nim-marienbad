@@ -8,6 +8,7 @@ import { clamp, lerp, smoothstep, DEG, rand, rng, mulberry32, quatFromYZ } from 
 
 const UP = new THREE.Vector3(0, 1, 0);
 const WORDS = ['none', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
+const OPENING_LAID_MATCHES = 4;
 
 // Timing for a strike: a wind-up that eases into a harder, faster stroke without stopping
 // at the top. Speed is two overlapping humps (the lift, then the strike); the result maps a
@@ -454,21 +455,13 @@ export class Director {
     this.box.updateMatrixWorld(true);
     return new THREE.Vector3(x, y, z).applyMatrix4(this.box.matrixWorld);
   }
-  // His left hand takes up the matchbox between thumb and fingers and holds it out over the
-  // board beside his right, the open drawer turned toward it; the right draws the matches
-  // from the drawer a few at a time and lays out `slots`, far row first. Then the box goes
-  // back where it lay.
-  async layOutFromBox(slots = this.matches.slots()) {
-    const L = this.oSupport, R = this.oHand;
-    this.mode = 'intro';
-    this.oActive = R;
+  matchboxGrip() {
     // The grip, built in the hand's own frame: thumb and fingers wrapped round the sleeve's
     // long sides near its closed end, the fingers pitched down and toward the drawer, the back
     // of the hand up. The box's grip point sits between thumb and finger pads, so it is always
     // held, never floating or palmed.
-    const restQ = this.boxRest.quat, restP = this.boxRest.pos;
     const grip = POSES.boxGrip;
-    const loc = tcpLocal(L.side, grip);
+    const loc = tcpLocal(this.oSupport.side, grip);
     // the hand in the box's frame: palm over the top, knuckles along its length, fingers
     // pointing across it (away from him) and curling down its far side, thumb on the near side
     const Yh = new THREE.Vector3(0, -0.3, -1).normalize();
@@ -484,17 +477,6 @@ export class Director {
       const q = boxQ.clone().multiply(relQi);
       return { q, w: boxP.clone().sub(relP.clone().applyQuaternion(q)) };
     };
-    const atRest = handFor(restQ, restP);
-    const qG = atRest.q, wGrip = atRest.w;
-    const gripPt = G.clone().applyQuaternion(restQ).add(restP);
-    const wAbove = wGrip.clone();
-    wAbove.y += 0.05;
-    await L.moveTo({ wrist: wAbove, quat: qG, pose: POSES.boxOpen, poseWin: [0.1, 0.8] });
-    await L.moveTo({ wrist: wGrip, quat: qG, pose: POSES.boxOpen, dur: 0.24, arc: 0 });
-    await L.moveTo({ wrist: wGrip, quat: qG, pose: grip, dur: 0.14, arc: 0, poseWin: [0, 1] });
-    this.boxSettle = null;
-    this.boxHeld = { hand: L, relP, relQ, t: 0, p0: this.box.position.clone(), q0: this.box.quaternion.clone() };
-    this.foley.tick(0.3, this.pan(gripPt));
     // held out over the board beside his right hand: the drawer pushed further out and
     // turned toward it, tipped up a little
     const xb = new THREE.Vector3(-1, 0.16, -0.3).normalize();
@@ -502,9 +484,47 @@ export class Director {
     const yb = new THREE.Vector3().crossVectors(zb, xb);
     const qBoxHold = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(xb, yb, zb));
     const hold = handFor(qBoxHold, new THREE.Vector3(0.08, TABLE_Y + 0.085, -0.235));
-    const qH = hold.q, wHold = hold.w;
+    const rest = handFor(this.boxRest.quat, this.boxRest.pos);
+    const gripPoint = G.clone().applyQuaternion(this.boxRest.quat).add(this.boxRest.pos);
+    return { grip, relP, relQ, hold, rest, gripPoint };
+  }
+
+  prepareOpening() {
+    if (this.still || this.debugLoop || this.debugPlayer) return;
+    // Begin after the first handful has landed, with the matchbox already in hand.
+    for (const match of this.matches.list.slice(OPENING_LAID_MATCHES)) {
+      match.state = 'box';
+      match.mesh.visible = false;
+    }
+    const { grip, relP, relQ, hold } = this.matchboxGrip();
+    const hand = this.oSupport;
+    hand.wrist.copy(hold.w);
+    hand.quat.copy(hold.q);
+    hand.basePose.set(grip);
+    hand.planted = hand.plantTarget = 0;
+    this.boxHeld = { hand, relP, relQ, t: 1, p0: this.box.position.clone(), q0: this.box.quaternion.clone() };
     this.drawerTarget = 0.014;
-    await L.moveTo({ wrist: wHold, quat: qH, pose: grip, poseWin: [0, 1], speed: 1.15 });
+  }
+
+  // Lay out slots from the drawer, far row first, then return the matchbox.
+  async layOutFromBox(slots = this.matches.slots()) {
+    const L = this.oSupport, R = this.oHand;
+    this.mode = 'intro';
+    this.oActive = R;
+    const { grip, relP, relQ, rest, hold, gripPoint } = this.matchboxGrip();
+    const qG = rest.q, wGrip = rest.w;
+    const wAbove = wGrip.clone();
+    wAbove.y += 0.05;
+    if (!this.boxHeld) {
+      await L.moveTo({ wrist: wAbove, quat: qG, pose: POSES.boxOpen, poseWin: [0.1, 0.8] });
+      await L.moveTo({ wrist: wGrip, quat: qG, pose: POSES.boxOpen, dur: 0.24, arc: 0 });
+      await L.moveTo({ wrist: wGrip, quat: qG, pose: grip, dur: 0.14, arc: 0, poseWin: [0, 1] });
+      this.boxSettle = null;
+      this.boxHeld = { hand: L, relP, relQ, t: 0, p0: this.box.position.clone(), q0: this.box.quaternion.clone() };
+      this.foley.tick(0.3, this.pan(gripPoint));
+      this.drawerTarget = 0.014;
+      await L.moveTo({ wrist: hold.w, quat: hold.q, pose: grip, poseWin: [0, 1], speed: 1.15 });
+    }
     // the rows, far to near
     const order = slots.slice().sort((s1, s2) => s1.row - s2.row || s1.col - s2.col);
     const inBox = () => this.matches.list.filter((m) => m.state === 'box');
@@ -541,7 +561,7 @@ export class Director {
     await L.moveTo({ wrist: wGrip.clone().setY(wGrip.y + 0.001), quat: qG, pose: grip, dur: 0.22, arc: 0 });
     this.boxHeld = null;
     this.boxSettle = { t: 0, p0: this.box.position.clone(), q0: this.box.quaternion.clone() };
-    this.foley.tap(0.35, this.pan(gripPt));
+    this.foley.tap(0.35, this.pan(gripPoint));
     await L.moveTo({ wrist: wGrip, quat: qG, pose: POSES.boxOpen, dur: 0.14, arc: 0, poseWin: [0, 1] });
     await L.moveTo({ wrist: wAbove, quat: qG, pose: POSES.boxOpen, dur: 0.25, arc: 0 });
     await Promise.all([back, this.goRest(L)]);
@@ -886,6 +906,8 @@ export class Director {
       await this.sched.wait(0.6);
       return this.debugLoop ? this.runDebugLoop() : this.runPlayerLoop();
     }
+    await this.layOutFromBox(this.matches.slots().slice(OPENING_LAID_MATCHES));
+    await this.sched.wait(0.6);
     for (;;) {
       await this.playGame();
       await this.sched.wait(1.6);
