@@ -449,17 +449,6 @@ export class Director {
     } else return;
     this.box.updateMatrixWorld(true);
   }
-  // every match back in the box (hidden), nothing on the table or in the piles
-  hideBoard() {
-    for (const p of Object.values(this.piles)) p.items = [];
-    for (const m of this.matches.list) {
-      m.state = 'box';
-      m.anim = null;
-      m.pile = null;
-      m.select = m.highlight = 0;
-      m.mesh.visible = false;
-    }
-  }
   // a point on the box (its own frame: x along it, toward the open drawer) in the world
   boxPoint(x, y, z) {
     this.box.updateMatrixWorld(true);
@@ -892,12 +881,11 @@ export class Director {
   async run() {
     // ?still: no game at all (debug: drive the hands from the console)
     if (this.still) { this.showBoard(); this.mode = 'idle'; return; }
-    if (this.debugLoop || this.debugPlayer) this.showBoard();
-    // the opponent lays the first game out of the box
-    if (!this.debugLoop && !this.debugPlayer) await this.layOutFromBox();
-    await this.sched.wait(0.6);
-    if (this.debugLoop) return this.runDebugLoop();
-    if (this.debugPlayer) return this.runPlayerLoop();
+    if (this.debugLoop || this.debugPlayer) {
+      this.showBoard();
+      await this.sched.wait(0.6);
+      return this.debugLoop ? this.runDebugLoop() : this.runPlayerLoop();
+    }
     for (;;) {
       await this.playGame();
       await this.sched.wait(1.6);

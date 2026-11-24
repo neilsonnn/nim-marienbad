@@ -457,7 +457,6 @@ function build() {
   director.still = params.has('still');
   ui.onConfirm = () => director.confirm();
   ui.onClear = () => director.clearSelection();
-  director.hideBoard(); // the opponent lays the first game out of the box
 
   if (params.has('gallery')) buildGallery();
   resize();
