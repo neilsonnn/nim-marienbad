@@ -521,8 +521,7 @@ function pickMatch(x, y) {
 }
 // Taps and drags paint the selection: the first match touched decides whether the
 // stroke selects or deselects, and the stroke stays in that match's row.
-// Right-drag or a trackpad two-finger drag nudges the view a few degrees; the mouse wheel
-// or a pinch zooms within limits.
+// Right-drag nudges the view and scroll zooms. On touch, two fingers can do both.
 let stroke = null;
 function paintAt(x, y, type) {
   if (!stroke || !director || director.mode !== 'select') return;
@@ -543,17 +542,33 @@ function applyOrbit() {
   camera.updateMatrixWorld();
 }
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-// two fingers on a touch screen pinch to zoom (and stop selecting)
+// Touch navigation follows the midpoint for orbit and the finger spacing for zoom.
 const touches = new Map();
+const touchOrbit = document.getElementById('touch-orbit');
+touchOrbit.addEventListener('click', () => touchOrbit.setAttribute('aria-pressed', String(touchOrbit.getAttribute('aria-pressed') !== 'true')));
+const thumbOrbit = () => touchOrbit.getAttribute('aria-pressed') === 'true';
 let pinch = null;
 const touchSpan = () => { const [p, q] = [...touches.values()]; return Math.hypot(p.x - q.x, p.y - q.y); };
 const touchMid = () => { const [p, q] = [...touches.values()]; return { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }; };
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch') {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (touches.size === 2) {
-      if (stroke) { stroke = null; }
-      pinch = { span: touchSpan(), mid: touchMid() };
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+    if (touches.size >= 2) {
+      if (touches.size === 2) {
+        if (stroke?.before && stroke.mode && director?.mode === 'select') {
+          director.clearSelection();
+          for (const match of stroke.before) director.setSelected(match, true);
+          director.setHover(null);
+        }
+        stroke = null;
+        if (orbit.drag && touches.has(orbit.drag.id)) orbit.drag = null;
+        pinch = { span: touchSpan(), mid: touchMid() };
+      }
+      return;
+    }
+    if (thumbOrbit()) {
+      orbit.drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
       return;
     }
   }
@@ -563,17 +578,19 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
   if (e.button !== 0 || pinch) return;
-  stroke = { id: e.pointerId, mode: null, row: -1, last: { x: e.offsetX, y: e.offsetY }, touched: new Set() };
+  const before = e.pointerType === 'touch' ? (director?.selection.slice() ?? []) : null;
+  stroke = { id: e.pointerId, mode: null, row: -1, last: { x: e.offsetX, y: e.offsetY }, touched: new Set(), before };
+  if (before) return;
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
   paintAt(e.offsetX, e.offsetY, e.pointerType);
 });
 canvas.addEventListener('pointermove', (e) => {
   if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (pinch && touches.size === 2) {
+  if (pinch && touches.has(e.pointerId)) {
     const span = touchSpan();
     const mid = touchMid();
     if (span > 1 && pinch.span > 1) nudgeLens(Math.log(span / pinch.span));
-    nudgeOrbit(-(mid.x - pinch.mid.x) * ORBIT_PER_PX(), (mid.y - pinch.mid.y) * ORBIT_PER_PX());
+    nudgeOrbit(-(mid.x - pinch.mid.x) * ORBIT_PER_PX(), -(mid.y - pinch.mid.y) * ORBIT_PER_PX());
     pinch.span = span;
     pinch.mid = mid;
     return;
@@ -583,12 +600,13 @@ canvas.addEventListener('pointermove', (e) => {
     orbit.drag.x = e.clientX; orbit.drag.y = e.clientY;
     // a full-width drag is a couple of times the whole range: a gentle wiggle
     if (e.shiftKey) nudgePan(-dx * PAN_PER_PX());
-    else nudgeOrbit(-dx * ORBIT_PER_PX(), dy * ORBIT_PER_PX());
+    else nudgeOrbit(-dx * ORBIT_PER_PX(), (e.pointerType === 'touch' ? -dy : dy) * ORBIT_PER_PX());
     return;
   }
   if (stroke && e.pointerId === stroke.id) {
     // sample along the drag so a quick swipe doesn't skip matches
     const x0 = stroke.last.x, y0 = stroke.last.y, x1 = e.offsetX, y1 = e.offsetY;
+    if (stroke.before && !stroke.mode && Math.hypot(x1 - x0, y1 - y0) < 3) return;
     const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / Math.max(3, pickRadius * 0.4)));
     for (let i = 1; i <= n; i++) paintAt(x0 + (x1 - x0) * (i / n), y0 + (y1 - y0) * (i / n), e.pointerType);
     stroke.last.x = x1; stroke.last.y = y1;
@@ -601,13 +619,22 @@ canvas.addEventListener('pointermove', (e) => {
   }
 });
 const endPointer = (e) => {
-  touches.delete(e.pointerId);
-  if (touches.size < 2) pinch = null;
   if (orbit.drag && e.pointerId === orbit.drag.id) orbit.drag = null;
-  if (stroke && e.pointerId === stroke.id) stroke = null;
+  if (stroke && e.pointerId === stroke.id) {
+    if (e.type === 'pointerup' && stroke.before && !stroke.mode) paintAt(e.offsetX, e.offsetY, e.pointerType);
+    stroke = null;
+  }
+  if (touches.delete(e.pointerId) && pinch) {
+    pinch = touches.size >= 2 ? { span: touchSpan(), mid: touchMid() } : null;
+    if (!pinch && touches.size === 1 && thumbOrbit()) {
+      const [id, point] = touches.entries().next().value;
+      orbit.drag = { id, ...point };
+    }
+  }
 };
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('lostpointercapture', endPointer);
 // Scrolling (mouse wheel or trackpad) and pinching zoom; dragging moves the camera
 // (right-drag with a mouse, two fingers on a touch screen; shift slides it sideways).
 const PAN_PER_PX = () => 0.6 / Math.max(400, canvas.clientWidth); // a full-width drag slides 60 cm
@@ -623,10 +650,10 @@ let gestureScale = 1;
 canvas.addEventListener('gesturestart', (e) => { e.preventDefault(); gestureScale = 1; });
 canvas.addEventListener('gesturechange', (e) => { e.preventDefault(); nudgeLens(Math.log(e.scale / gestureScale)); gestureScale = e.scale; });
 canvas.addEventListener('gestureend', (e) => e.preventDefault());
-canvas.addEventListener('dblclick', () => director && director.confirm());
+canvas.addEventListener('dblclick', () => { if (!thumbOrbit()) director?.confirm(); });
 window.addEventListener('keydown', (e) => {
   if (!director) return;
-  if (e.key === 'Enter') director.confirm();
+  if (e.key === 'Enter' && e.target !== touchOrbit) director.confirm();
   if (e.key === 'Escape') director.clearSelection();
   // left / right arrows slide the camera sideways 1 cm a press (shift: 5 cm)
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') nudgePan((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 0.05 : 0.01));
@@ -816,7 +843,7 @@ raf(() => {
       err.textContent = 'Something went wrong while building the scene.';
       return;
     }
-    if (!OPENING) ui.ready(() => (holding = false));
+    if (!OPENING) ui.ready(() => { holding = false; touchOrbit.hidden = false; });
     last = performance.now();
     raf(loop);
     if (params.has('camdebug')) setCamDebug(true);
